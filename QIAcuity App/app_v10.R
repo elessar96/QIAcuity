@@ -1,28 +1,4 @@
 
-options(RCurlOptions=list(proxy="www-int2.inet.dkfz-heidelberg.de:80", http.version=1))
-
-Renviron <- readLines('~/.Renviron')
-
-http_pos <-  grep("^http_proxy", Renviron)
-edit_necessary <- FALSE
-
-if(!Renviron[[http_pos]] == "http_proxy=http://www-int2.dkfz-heidelberg.de:3128/"){
-  Renviron[[http_pos]] <- "http_proxy=http://www-int2.dkfz-heidelberg.de:3128/"
-  edit_necessary <- TRUE
-}
-
-https_pos <- grep("^https_proxy", Renviron)
-
-if(!Renviron[[https_pos]] == "https_proxy=http://www-int2.dkfz-heidelberg.de:3128/"){
-  Renviron[[https_pos]] <- "https_proxy=http://www-int2.dkfz-heidelberg.de:3128/"
-  edit_necessary <- TRUE
-}
-
-if(edit_necessary==TRUE){
-  #writeLines(Renviron, con = "~/.Renviron")
-  print(".Renviron file needs to be altered to include DKFZ proxy server info. App restart required.")
-  stopApp()
-}
 
 if (!require("shiny", quietly = TRUE))
   install.packages("shiny")
