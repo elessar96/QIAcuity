@@ -588,11 +588,16 @@ QIAcuityAnalysis <- function(path, coupled_channels=data.frame(ch1=character(len
         # find partitions that should
         comp_correction_candidates <- competition_corrected %>%  mutate(peak:= !!sym(current_channel) %>% cut(., breaks=breaks, labels=1:(length(breaks)-1))) %>% na.omit() %>% select(all_of(c("Partition", "Well", "peak"))) %>% left_join(., crosstalk_corrected_dichot)
         
+        neg_sd <- crosstalk_corrected %>% filter(R< thresholds[which(thresholds$channel == channels[[i]]), "crosstalk"]) %>% pull(R) %>% sd(., na.rm=TRUE)
+        neg_mean <- crosstalk_corrected %>% filter(R< thresholds[which(thresholds$channel == channels[[i]]), "crosstalk"]) %>% pull(R) %>% mean(., na.rm=TRUE)
+
         comp_correction_candidates <- comp_correction_candidates %>% filter(if_any(ends_with(channels[which(!channels==current_channel)]), ~ . >0))
         
         comp_correction_candidates <- merge(comp_correction_candidates, competition_corrected, by=c("Partition", "Well"))
         
         vars <- comp_correction_candidates  %>% select(matches("^\\w\\.x")) %>% colnames()
+        
+        comp_correction_candidates <- comp_correction_candidates %>% mutate(z_score = abs(!!sym(paste(channels[[i]], ".y", sep="")) - neg_mean)/neg_sd) %>% filter(z_score >6)
         
         comp_correction_candidates <- comp_correction_candidates %>% group_by(across(vars))
         
@@ -734,6 +739,7 @@ summarizeQIAcuityResult <- function(results, detailed_plots=TRUE, scatterplots_1
         }
     }
     if(!j==1){
+  
       n_part <- channel_summaries %>% mutate(valid=positive + negative) %>% pull(valid)# %>% median(., na.rm = TRUE)
       
       mm_vol <- 0
@@ -745,6 +751,8 @@ summarizeQIAcuityResult <- function(results, detailed_plots=TRUE, scatterplots_1
       }
       
       poisson.CI <- function(x){return(poisson.test(x)$conf.int %>% round(digits=1) %>% paste(., collapse=" - "))}      
+      
+      
       
       channel_summaries <- channel_summaries %>% mutate(CI=lapply(.$positive, poisson.CI)) %>% relocate(any_of(c("Sample", "Well", "Channel", "negative", "positive", "CI"))) 
       
