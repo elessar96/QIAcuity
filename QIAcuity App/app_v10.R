@@ -51,7 +51,7 @@ ui <- fluidPage( # Application title
                    code_font = font_google("Open Sans")))
 
 server <- function(input, output) {
-  root <- getwd() %>% dirname() %>% dirname()
+  root <- getwd() %>% dirname() %>% dirname() %>% dirname()
   
   shinyDirChoose(input, id = 'directory_input', roots=c(wd=root), filetypes=c('', 'txt'))
   shinyDirChoose(input, id = 'directory_output', roots=c(wd=root), filetypes=c('', 'txt'))
@@ -69,7 +69,7 @@ server <- function(input, output) {
   
   output$done <- renderText({
     if(input$analyse==TRUE){
-      root <- getwd() %>% dirname() %>% dirname()
+      root <- getwd() %>% dirname() %>% dirname() %>% dirname()
       
       input_path <- input$directory_input%>% unlist() %>% paste(collapse="/") %>% gsub("wd", "", .) %>% paste(root, ., sep="") # %>% normalizePath()
       output_path <- input$directory_output%>% unlist() %>% paste(collapse="/") %>% gsub("wd", "", .) %>% paste(root, ., sep="") # %>% normalizePath()
