@@ -4,10 +4,12 @@
 \alias{find_turnpoints}
 \title{Find turnpoints in a distribution}
 \usage{
-find_turnpoints(data, variable = NULL)
+find_turnpoints(data, variable)
 }
 \arguments{
-\item{data}{Test}
+\item{data}{A dataframe or matrix only with numeric RFU values. Columns: Channels, Rows: partitions. Important:}
+
+\item{variable}{A character specifying the column of data to be examined}
 }
 \value{
 A dataframe with turnpoints

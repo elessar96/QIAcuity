@@ -4,7 +4,12 @@
 \alias{summarizeQIAcuityResult}
 \title{Generate output of QIAcuity Analyisis}
 \usage{
-summarizeQIAcuityResult(results, detailed_plots = TRUE, scatterplots_1d = TRUE)
+summarizeQIAcuityResult(
+  results,
+  detailed_plots = TRUE,
+  scatterplots_1d = TRUE,
+  output_path = getwd()
+)
 }
 \arguments{
 \item{results}{The output of the QIAcuityAnalysis function.}
@@ -12,6 +17,8 @@ summarizeQIAcuityResult(results, detailed_plots = TRUE, scatterplots_1d = TRUE)
 \item{detailed_plots}{Set to TRUE to generate 2D scatterplots at every correction step}
 
 \item{scatterplots_1d}{Set to TRUE to generate 1D scatterplots at every correction step}
+
+\item{output_path}{path to where files and plots should be saved. Will create directory for the experiment there.}
 }
 \value{
 NULL. Generates output files: .csv files for the results per partition, .xlsx files for summaries at each correction step. 2D scatterplots for all channel combinations and 1D scatterplots for each channel at every step. Also puts the crosstalk and competition analyses into .xlsx files.

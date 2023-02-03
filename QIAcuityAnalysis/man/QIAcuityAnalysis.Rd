@@ -5,13 +5,16 @@
 \title{Analyze output of a QIAcuity experiment}
 \usage{
 QIAcuityAnalysis(
-  path,
+  input_path,
+  output_path,
   coupled_channels = data.frame(ch1 = character(length = 0), ch2 = character(length =
     0))
 )
 }
 \arguments{
-\item{path}{path to where the .zip or .csv files exported from the QIAcuity software are saved}
+\item{input_path}{path to where the .zip or .csv files exported from the QIAcuity software are saved. No files are written here. The function can handle multiple experiments saved in the same directory. It will always analyze all of them and create separate results for them.}
+
+\item{output_path}{path to where any results and plots should be saved. Directory for each experiment will be created there.}
 
 \item{coupled_channels}{Data frame containing any channels the targets of which are on the same chromosome or otherwise to be expecte in the same partitions}
 }

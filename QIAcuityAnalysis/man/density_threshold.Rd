@@ -13,14 +13,18 @@ density_threshold(
 )
 }
 \arguments{
+\item{input_data}{An object of class dataframe containing fluorescence intensities fom ddPCR partitions.}
+
 \item{variable}{Name of the variable in the dataframe to be pulled}
 
-\item{data}{Either an object of class dataframe (if parameter variable is defined), of a vector that can be forced to numeric}
+\item{min_dist}{Determines the minimum distance between threshold and negative partitions, always as a fraction of the distance between true positive and true negative populations.}
 
-\item{stringent}{If set to TRUE, forces script to set threshold half-way between mu of the two normal distributions. This decreases the number of false positive results.}
+\item{references}{Reference peaks for guiding classification}
+
+\item{pc_data}{Positive control data as a reference to calculate maximum expected values for each channel}
 }
 \value{
-An object of class dataframe of the RFU values from the .csv-file
+A numeric value giving the optimal threshold for distinguishing the true positive and true negative populations in the data.
 }
 \description{
 This function defines a threshold that best divides a population of data points into two separate groups based on mixture modeling.

@@ -13,7 +13,15 @@ classify_peaks(
 )
 }
 \arguments{
-\item{data}{Test}
+\item{turnpoints}{Output of find_turnpoints}
+
+\item{intensities}{Fluorescence intensity values in a data frame}
+
+\item{variable}{Which column in intensities is the channel to be examined}
+
+\item{channel_maxima}{A named list giving the maximum values expected for each of the channels found in intensities}
+
+\item{reference_peaks}{A dataframe of previously classified peaks to guide this classification; optional.}
 }
 \value{
 A dataframe with turnpoints

@@ -38,10 +38,11 @@ check_NAs <- function(vec){
 
 #' @title Find turnpoints in a distribution
 #' @description This function detects turnpoints in a distribution
-#' @param data Test
+#' @param data A dataframe or matrix only with numeric RFU values. Columns: Channels, Rows: partitions. Important: 
+#' @param variable A character specifying the column of data to be examined
 #' @return A dataframe with turnpoints
 
-find_turnpoints <- function(data, variable=NULL){
+find_turnpoints <- function(data, variable){
   # filter out non-numeric data
   data <- data %>% mutate_if(is.factor, as.numeric) %>% mutate_if(is.character, as.numeric) %>% select_if(check_NAs) %>% na.omit()
   
@@ -87,7 +88,11 @@ find_turnpoints <- function(data, variable=NULL){
 
 #' @title Classify peaks previously detected by find_turnpoints()
 #' @description This function classifies turnpoints in a distribution
-#' @param data Test
+#' @param turnpoints Output of find_turnpoints
+#' @param intensities Fluorescence intensity values in a data frame
+#' @param variable Which column in intensities is the channel to be examined
+#' @param channel_maxima A named list giving the maximum values expected for each of the channels found in intensities
+#' @param reference_peaks A dataframe of previously classified peaks to guide this classification; optional.
 #' @return A dataframe with turnpoints
 
 classify_peaks <- function(turnpoints, intensities, variable, channel_maxima, reference_peaks=NULL){
@@ -182,10 +187,12 @@ classify_peaks <- function(turnpoints, intensities, variable, channel_maxima, re
 
 #' @title Define a threshold based on mixture modeling
 #' @description This function defines a threshold that best divides a population of data points into two separate groups based on mixture modeling.
-#' @param data Either an object of class dataframe (if parameter variable is defined), of a vector that can be forced to numeric
+#' @param input_data An object of class dataframe containing fluorescence intensities fom ddPCR partitions.
 #' @param variable  Name of the variable in the dataframe to be pulled
-#' @param stringent If set to TRUE, forces script to set threshold half-way between mu of the two normal distributions. This decreases the number of false positive results.
-#' @return An object of class dataframe of the RFU values from the .csv-file 
+#' @param min_dist Determines the minimum distance between threshold and negative partitions, always as a fraction of the distance between true positive and true negative populations.
+#' @param references Reference peaks for guiding classification
+#' @param pc_data Positive control data as a reference to calculate maximum expected values for each channel
+#' @return A numeric value giving the optimal threshold for distinguishing the true positive and true negative populations in the data. 
 
 density_threshold <- function(input_data, variable, min_dist=0.2, references=NULL, pc_data =NULL){
   
@@ -292,12 +299,13 @@ setup <- function(){
 
 #' @title Analyze output of a QIAcuity experiment
 #' @description This function takes the files exported from the QIAcuity software for one or more experiments and analyzes them in an automated way.
-#' @param path path to where the .zip or .csv files exported from the QIAcuity software are saved
+#' @param input_path path to where the .zip or .csv files exported from the QIAcuity software are saved. No files are written here. The function can handle multiple experiments saved in the same directory. It will always analyze all of them and create separate results for them.
+#' @param output_path path to where any results and plots should be saved. Directory for each experiment will be created there.
 #' @param coupled_channels Data frame containing any channels the targets of which are on the same chromosome or otherwise to be expecte in the same partitions
 #' @return A list containing a list of dataframes for each experiment.
 #' @details This function returns a list with an element for each experiment that was in the directory set by path. In each element there are the following data frames: The data for all channels in raw data, after baseline correction, cross talk correction and competition correction; cross talk and competition analyses that give an estimate of the magnitude of the effects the different reactions have on each other; thresholds gives the thresholds for each channel at each step; Volumes contains information about the total volume contained in the partitions of each well.
 
-QIAcuityAnalysis <- function(input_path, output_path, coupled_channels=data.frame(ch1=character(length=0), ch2=character(length=0))){ #}, outlier_detection=TRUE, alpha=0.01){
+QIAcuityAnalysis <- function(input_path, output_path, coupled_channels=data.frame(ch1=character(length=0), ch2=character(length=0))){ 
 
   setwd(input_path)
   
@@ -658,6 +666,7 @@ QIAcuityAnalysis <- function(input_path, output_path, coupled_channels=data.fram
 #' @param results The output of the QIAcuityAnalysis function.
 #' @param detailed_plots Set to TRUE to generate 2D scatterplots at every correction step
 #' @param scatterplots_1d Set to TRUE to generate 1D scatterplots at every correction step
+#' @param output_path path to where files and plots should be saved. Will create directory for the experiment there.
 #' @return NULL. Generates output files: .csv files for the results per partition, .xlsx files for summaries at each correction step. 2D scatterplots for all channel combinations and 1D scatterplots for each channel at every step. Also puts the crosstalk and competition analyses into .xlsx files. 
 
 summarizeQIAcuityResult <- function(results, detailed_plots=TRUE, scatterplots_1d=TRUE, output_path=getwd()){
