@@ -27,11 +27,12 @@ ui <- fluidPage( # Application title
   mainPanel(
     
     fluidRow(
-    p("Please paste the path to a folder which contains raw data exported from the QIAcuity software."),
-    textInput("dir", "Path:", value=getwd()),
-    actionButton("setdir", "Select")),
-    fluidRow(strong("Currently selected path:")),
-    fluidRow(verbatimTextOutput("dir", placeholder = TRUE)), 
+    shinyDirButton(id='directory_input', label='Select an input folder', title='Please select an input folder')),
+    fluidRow(strong("Currently selected output path:")),
+    fluidRow(verbatimTextOutput("indir", placeholder = TRUE)), 
+    fluidRow(shinyDirButton(id='directory_output', label='Select an output folder', title='Please select an output folder')),
+    fluidRow(strong("Currently selected output path:")),
+    fluidRow(verbatimTextOutput("outdir", placeholder = TRUE)), 
     strong("Plotting options:"),
     checkboxInput("detailPlots", label="Generate 2D scatterplots"),
     checkboxInput("scat1dPlots", label="Generate 1D scatterplots"),
@@ -50,18 +51,29 @@ ui <- fluidPage( # Application title
                    code_font = font_google("Open Sans")))
 
 server <- function(input, output) {
+  root <- getwd() %>% dirname() %>% dirname()
   
+  shinyDirChoose(input, id = 'directory_input', roots=c(wd=root), filetypes=c('', 'txt'))
+  shinyDirChoose(input, id = 'directory_output', roots=c(wd=root), filetypes=c('', 'txt'))
   global <- reactiveValues(datapath = getwd(), status = "")
   
-  dir <- reactive(input$dir)
+  output$indir <- renderText({
+    input$directory_input %>% unlist() %>% paste(collapse="/") %>% gsub("wd", "", .) %>% paste(".", ., sep="") %>% gsub("^\\.\\d+$", "./", .)
+  })
   
-  output$dir <- renderText({
-    global$datapath
+  observe(outdir <- reactive(input$directory_output))
+  
+  output$outdir <- renderText({
+    input$directory_output %>% unlist() %>% paste(collapse="/") %>% gsub("wd", "", .) %>% paste(".", ., sep="") %>% gsub("^\\.\\d+$", "./", .)
   })
   
   output$done <- renderText({
     if(input$analyse==TRUE){
-      path <- global$datapath %>% normalizePath()
+      root <- getwd() %>% dirname() %>% dirname()
+      
+      input_path <- input$directory_input%>% unlist() %>% paste(collapse="/") %>% gsub("wd", "", .) %>% paste(root, ., sep="") # %>% normalizePath()
+      output_path <- input$directory_output%>% unlist() %>% paste(collapse="/") %>% gsub("wd", "", .) %>% paste(root, ., sep="") # %>% normalizePath()
+      
       if(length(input$coupled)==0){
         coupled <- data.frame(ch1=character(length=0), ch2=character(length=0))
       }else{
@@ -69,11 +81,11 @@ server <- function(input, output) {
         colnames(coupled) <- c("ch1", "ch2")
         rownames(coupled) <- NULL
       }
-      
 
       setup()
-      result <- QIAcuityAnalysis(path, coupled_channels = coupled)
-      summarizeQIAcuityResult(result, detailed_plots=input$detailPlots, scatterplots_1d=input$scat1dPlots)
+      
+      result <- QIAcuityAnalysis(input_path=input_path, output_path=output_path, coupled_channels = coupled)
+      summarizeQIAcuityResult(result, detailed_plots=input$detailPlots, scatterplots_1d=input$scat1dPlots, output_path=output_path)
       "Analysis completed"
     }
     

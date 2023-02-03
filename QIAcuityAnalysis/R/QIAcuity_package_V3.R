@@ -263,9 +263,6 @@ setup <- function(){
   if (!require("BiocManager", quietly = TRUE))
     install.packages("BiocManager")
   
-  if(!require("ggpubr", quietly=TRUE))
-    install.packages("ggpubr")
-  
   if(!require("dplyr", quietly=TRUE))
     install.packages("dplyr")
   
@@ -289,7 +286,6 @@ setup <- function(){
   library(tidyr)
   library(tidyverse)
   library(ggplot2)
-  library(ggpubr)
   library(dplyr)
   library(openxlsx)
 }
@@ -301,8 +297,9 @@ setup <- function(){
 #' @return A list containing a list of dataframes for each experiment.
 #' @details This function returns a list with an element for each experiment that was in the directory set by path. In each element there are the following data frames: The data for all channels in raw data, after baseline correction, cross talk correction and competition correction; cross talk and competition analyses that give an estimate of the magnitude of the effects the different reactions have on each other; thresholds gives the thresholds for each channel at each step; Volumes contains information about the total volume contained in the partitions of each well.
 
-QIAcuityAnalysis <- function(path, coupled_channels=data.frame(ch1=character(length=0), ch2=character(length=0))){ #}, outlier_detection=TRUE, alpha=0.01){
-  setwd(path)
+QIAcuityAnalysis <- function(input_path, output_path, coupled_channels=data.frame(ch1=character(length=0), ch2=character(length=0))){ #}, outlier_detection=TRUE, alpha=0.01){
+
+  setwd(input_path)
   
   files <- dir()
   # find all experiments in directory
@@ -334,8 +331,6 @@ QIAcuityAnalysis <- function(path, coupled_channels=data.frame(ch1=character(len
     plate_files <- dir()[grep(plates[[k]], dir())]
     #if csv files among them, analyze those files (assumption: .zip has been unzipped!)
     csv_files <- plate_files[grep(".csv", plate_files)]
-    dirname <- paste("plate", k)
-    dir.create(dirname)
     
     # if no csv files, unzip any zip-files
     if(length(csv_files)==0){
@@ -343,12 +338,14 @@ QIAcuityAnalysis <- function(path, coupled_channels=data.frame(ch1=character(len
       if(length(zip_file)==0){
         stop("Error: neither suitable .csv nor .zip file containing QIAcuity raw data were found.")
       }
+      dirname <- paste(output_path, "\\plate ", k, "_", plates[[k]], sep="")
+      dir.create(dirname)
+      unzip(zip_file, exdir=dirname, overwrite = FALSE)
 
-      unzip(zip_file, exdir=dirname, overwrite = TRUE)
       setwd(dirname)
       csv_files <- dir()[grep(".csv", dir())]
       dataframes1 <- csv_files %>% lapply(., read.data.QIAcuity)
-      setwd("..")
+
     }else{
       dataframes1 <- csv_files %>% lapply(., read.data.QIAcuity)
     }
@@ -663,12 +660,15 @@ QIAcuityAnalysis <- function(path, coupled_channels=data.frame(ch1=character(len
 #' @param scatterplots_1d Set to TRUE to generate 1D scatterplots at every correction step
 #' @return NULL. Generates output files: .csv files for the results per partition, .xlsx files for summaries at each correction step. 2D scatterplots for all channel combinations and 1D scatterplots for each channel at every step. Also puts the crosstalk and competition analyses into .xlsx files. 
 
-summarizeQIAcuityResult <- function(results, detailed_plots=TRUE, scatterplots_1d=TRUE){
+summarizeQIAcuityResult <- function(results, detailed_plots=TRUE, scatterplots_1d=TRUE, output_path=getwd()){
   plate_summaries <- rep(NA, times=length(results)) %>% as.list()
   names(plate_summaries) <- names(results)
   corrections = c("raw_data", "baseline_corrected", "crosstalk_corrected", "competition_corrected")
+  
+  setwd(output_path)
+  
   for(i in 1:length(results)){
-    dirname <- paste("plate", i)
+    dirname <- paste(output_path, "\\plate ", i, "_", names(results)[[i]], sep="")
     dir.create(dirname)
     setwd(dirname)
     n_channels <- results[[i]]$thresholds %>% nrow()
