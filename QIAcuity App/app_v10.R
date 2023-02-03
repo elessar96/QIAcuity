@@ -53,8 +53,8 @@ ui <- fluidPage( # Application title
 server <- function(input, output) {
   root <- getwd() %>% dirname() %>% dirname() %>% dirname()
   
-  shinyDirChoose(input, id = 'directory_input', roots=c(wd=root), filetypes=c('', 'txt'))
-  shinyDirChoose(input, id = 'directory_output', roots=c(wd=root), filetypes=c('', 'txt'))
+  shinyDirChoose(input, id = 'directory_input', roots=c(wd=root))
+  shinyDirChoose(input, id = 'directory_output', roots=c(wd=root))
   global <- reactiveValues(datapath = getwd(), status = "")
   
   output$indir <- renderText({
