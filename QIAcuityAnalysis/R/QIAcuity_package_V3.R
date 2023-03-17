@@ -127,7 +127,7 @@ classify_peaks <- function(turnpoints, intensities, variable, channel_maxima, re
     peak_info <- peak_info %>% mutate(tn.peak = ifelse(dist.tn == dist.tn %>% abs() %>% min(), TRUE, FALSE)) %>% mutate(tp.peak = ifelse(dist.tp == dist.tp %>% abs() %>% min(), TRUE, FALSE))
 
     tn_candidates <- peak_info %>% arrange(peak) %>% mutate(rank_dist.tn =rank(dist.tn)) %>% mutate(rank_dist.tp =rank(-dist.tp)) %>% mutate(max_others = rank(max_others)) %>% mutate(height=rank(-as.numeric(height))) %>% mutate(rank = height + max_others + rank_dist.tn) %>% filter(rank == min(rank))
-    tp_candidates <- peak_info %>% filter(dist.tn > abs(ref_peaks[1,]$d.x - ref_peaks[2,]$d.x)/4) %>% arrange(peak) %>% mutate(rank_dist.tn =rank(-dist.tn)) %>% mutate(rank_dist.tp =rank(dist.tp)) %>% mutate(max_others = rank(max_others)) %>% mutate(rank = max_others + rank_dist.tp) %>% filter(rank == min(rank))
+    tp_candidates <- peak_info %>% filter(dist.tn > abs(reference_peaks[1,]$d.x - reference_peaks[2,]$d.x)/4) %>% arrange(peak) %>% mutate(rank_dist.tn =rank(-dist.tn)) %>% mutate(rank_dist.tp =rank(dist.tp)) %>% mutate(max_others = rank(max_others)) %>% mutate(rank = max_others + rank_dist.tp) %>% filter(rank == min(rank))
 
     #if the same peak is classified as both TN and TP, decide based on distance to reference peaks:
     if(nrow(tn_candidates)==1 & nrow(tp_candidates)==1){
@@ -427,8 +427,14 @@ QIAcuityAnalysis <- function(input_path, output_path, coupled_channels=data.fram
         classified_turnpoints_well <- classify_peaks(turnpoints = turnpoints_well, intensities = well_data %>% select(!any_of(c("Well", "Sample", "Partition"))), variable = current_channel, channel_maxima = tp_data %>% apply(., 2, max), reference_peaks = ref_peaks)
 
         tn_peak_well <- classified_turnpoints_well %>% filter(tn.peak == TRUE)
-        upper_lim <- classified_turnpoints_well %>% filter(d.x > tn_peak_well %>% pull(d.x)) %>% pull(d.x) %>% min()
-        lower_lim <- classified_turnpoints_well %>% filter(d.x < tn_peak_well %>% pull(d.x)) %>% pull(d.x) %>% max()
+        if(nrow(tn_peak_well)>0){
+          upper_lim <- classified_turnpoints_well %>% filter(d.x > tn_peak_well %>% pull(d.x)) %>% pull(d.x) %>% min()
+          lower_lim <- classified_turnpoints_well %>% filter(d.x < tn_peak_well %>% pull(d.x)) %>% pull(d.x) %>% max()
+        }else{
+          upper_lim <- 0
+          lower_lim <- 0
+        }
+
         baseline_well <- well_data %>% filter(!!sym(current_channel) > lower_lim) %>% filter(!!sym(current_channel) < upper_lim) %>% select(any_of(current_channel)) %>% unlist() %>% median()
 
         n_below <- well_data %>% filter(Well==wells[[well]]) %>% filter(!!sym(current_channel)<upper_lim) %>% nrow()
@@ -641,7 +647,7 @@ QIAcuityAnalysis <- function(input_path, output_path, coupled_channels=data.fram
 
               competition_raw <- predict(model_competition, crosstalk_corrected)
 
-              competition_corrected[,channels[[i]]] <- competition_corrected[,channels[[i]]] - competition_raw*(1-(corr_factor_i-1)^2)#*(1-(corr_factor_r-1)^2)
+              competition_corrected[,channels[[i]]] <- competition_corrected[,channels[[i]]] - competition_raw*(1-(corr_factor_i-1)^2)*(1-(corr_factor_r-1)^2)
 
               competition_analysis <- data.frame(ch1=channels[[j]], ch2=channels[[i]], competition=model_competition$coefficients[[2]]) %>% bind_rows(., competition_analysis)
 
