@@ -1,3 +1,5 @@
+setup_conducted <- FALSE
+
 #' @title Read QIAcuity data
 #' @description  This function reads in raw data .csv-files from the QIAcuity system
 #' @param filename Path to the location of the QIAcuity .csv-file to be read.
@@ -28,7 +30,7 @@ check_NAs <- function(vec){
     vec_tab <- c(vec_tab, "TRUE"=0)
   }
 
-  if((vec_tab["TRUE"]/sum(vec_tab)) < 0.5){
+  if(vec_tab["TRUE"]<sum(vec_tab)*0.99){
     return(TRUE)
   }else{
     return(FALSE)
@@ -42,12 +44,12 @@ check_NAs <- function(vec){
 #' @param variable A character specifying the column of data to be examined
 #' @return A dataframe with turnpoints
 
-find_turnpoints <- function(data, variable){
+find_turnpoints <- function(data, variable, n_points=30){
   # filter out non-numeric data
   data <- data %>% mutate_if(is.factor, as.numeric) %>% mutate_if(is.character, as.numeric) %>% select_if(check_NAs) %>% na.omit()
 
   # fit density curve to data
-  d <- density(x=data %>% pull(variable), bw="sj", n=30)
+  d <- density(x=data %>% pull(variable), bw="sj", n=n_points)
 
   # find turnpoints
   ts_y <- ts(d$y)
@@ -107,9 +109,11 @@ classify_peaks <- function(turnpoints, intensities, variable, channel_maxima, re
   for(chan in 1: length(other_channels)){
     peak_info[,other_channels[[chan]]] <- peak_info[,other_channels[[chan]]]/channel_maxima[other_channels[[chan]]]
   }
-
-  # summarize data
   peak_info <- peak_info %>% na.omit() %>% group_by(peak) %>% summarize_at(.vars = colnames(intensities), .funs= c("min"=min, "median"=median, "max"=max)) %>% na.omit() %>% mutate_if(is.numeric, round, digits=1)
+
+  if(ncol(peak_info)==4){
+    peak_info <- peak_info %>% rename(., !!sym(paste(variable, "_median", sep="")):=median, !!sym(paste(variable, "_min", sep="")):=min, !!sym(paste(variable, "_max", sep="")):=max)# %>% rename(!!sym(paste(variable, "median")) := median) %>% rename(!!sym(paste(variable, "max")) := max)
+  }
 
   # add position and height info
   peak_indices <- peak_info %>% pull(peak) %>% gsub("peak ", "", .) %>% as.numeric()
@@ -123,11 +127,17 @@ classify_peaks <- function(turnpoints, intensities, variable, channel_maxima, re
 
   if(!is.null(reference_peaks)){
     # if reference TN and TP peaks are provided, make decision purely on peak positions!
-    peak_info <- peak_info %>% mutate(dist.tn=abs(position - reference_peaks %>% filter(tn.peak==TRUE) %>% pull(d.x))) %>% mutate(dist.tp=abs(position - reference_peaks %>% filter(tp.peak==TRUE) %>% pull(d.x)))
-    peak_info <- peak_info %>% mutate(tn.peak = ifelse(dist.tn == dist.tn %>% abs() %>% min(), TRUE, FALSE)) %>% mutate(tp.peak = ifelse(dist.tp == dist.tp %>% abs() %>% min(), TRUE, FALSE))
+    if(nrow(peak_info)>2){
+      ref_height <- peak_info %>% mutate(rank_height = rank(-height)) %>% filter(rank_height ==2 ) %>% pull(height)
+      peak_info <- peak_info %>% filter(height>(ref_height/5))
+    }
 
-    tn_candidates <- peak_info %>% arrange(peak) %>% mutate(rank_dist.tn =rank(dist.tn)) %>% mutate(rank_dist.tp =rank(-dist.tp)) %>% mutate(max_others = rank(max_others)) %>% mutate(height=rank(-as.numeric(height))) %>% mutate(rank = height + max_others + rank_dist.tn) %>% filter(rank == min(rank))
-    tp_candidates <- peak_info %>% filter(dist.tn > abs(reference_peaks[1,]$d.x - reference_peaks[2,]$d.x)/4) %>% arrange(peak) %>% mutate(rank_dist.tn =rank(-dist.tn)) %>% mutate(rank_dist.tp =rank(dist.tp)) %>% mutate(max_others = rank(max_others)) %>% mutate(rank = max_others + rank_dist.tp) %>% filter(rank == min(rank))
+    peak_info <- peak_info %>% mutate(dist.tn=abs(position - reference_peaks %>% filter(tn.peak==TRUE) %>% pull(d.x))) %>% mutate(dist.tp=abs(position - reference_peaks %>% filter(tp.peak==TRUE) %>% pull(d.x)))
+    peak_info <- peak_info %>% mutate(tn.peak.dist = ifelse(dist.tn == dist.tn %>% abs() %>% min(), 1, 0)) %>% mutate(tp.peak = ifelse(dist.tp == dist.tp %>% abs() %>% min(), TRUE, FALSE))
+
+
+    tn_candidates <- peak_info %>% mutate(rank_height = rank(height)) %>% mutate(rank=tn.peak.dist*2 + rank_height) %>% filter(rank == max(rank))
+    tp_candidates <- peak_info %>% filter(tp.peak==TRUE) %>% filter(dist.tn > abs(reference_peaks[1,]$d.x - reference_peaks[2,]$d.x)/4) %>% arrange(peak) %>% mutate(rank_dist.tn =rank(-dist.tn)) %>% mutate(rank_dist.tp =rank(dist.tp)) %>% mutate(max_others = rank(max_others)) %>% mutate(rank = max_others + rank_dist.tp) %>% filter(rank == min(rank))
 
     #if the same peak is classified as both TN and TP, decide based on distance to reference peaks:
     if(nrow(tn_candidates)==1 & nrow(tp_candidates)==1){
@@ -142,15 +152,38 @@ classify_peaks <- function(turnpoints, intensities, variable, channel_maxima, re
     }
 
   }else{
-    #find candidates based on height, positin and crosstalk intensity
-    tn_candidates <- peak_info %>% arrange(peak) %>% mutate(max_others = rank(max_others)) %>% mutate(position = rank(abs(as.numeric(position)))) %>% mutate(height=rank(-as.numeric(height))*2) %>% mutate(rank = max_others + position + height) %>% filter(rank == min(rank))
-    tp_candidates <- peak_info %>% filter(!peak %in% c(tn_candidates %>% filter(position==min(position)) %>% pull(peak))) %>% arrange(peak) %>% mutate(pos = peaks$d.x[.$peak]) %>% mutate(max_others = rank(max_others)) %>% mutate(position = rank(-position)) %>% mutate(rank = max_others + position) %>% filter(rank == min(rank))
+    #find candidates based on height, position and crosstalk intensity
+    if(nrow(peak_info)>2){
+      tn_candidates <- peak_info %>% filter(height > max(height)/100)
+      if(length(other_channels)==0){
+        tn_candidates <- tn_candidates %>% arrange(peak) %>% mutate(position = rank(abs(as.numeric(position)))) %>% mutate(rank = position) %>% filter(rank == min(rank))
+      }else{
+        ct_detection <- tn_candidates %>% mutate(across(.cols=matches("median"), .fns=function(x){return(x-min(x))}))
+        ct_detection <- ct_detection %>% mutate(max_others = ct_detection %>% select(!starts_with(variable)) %>% select(matches("median")) %>% apply(., MARGIN=1, FUN=max))
+
+        non_ct_peaks <- ct_detection %>% filter(max_others < min(max_others)+0.5*sd(max_others))
+        if(nrow(non_ct_peaks)==0){
+          non_ct_peaks <- tn_candidates %>% filter(max_others <= min(max_others) + 0.2)
+        }
+        tn_candidates <- non_ct_peaks %>% arrange(peak)  %>% mutate(max_others = rank(max_others)) %>% mutate(position = rank(abs(as.numeric(position)))) %>% mutate(rank = max_others + position) %>% filter(rank == min(rank)) %>% filter(position==min(position))
+      }
+      tp_candidates <- peak_info %>% filter(position > (peak_info %>% filter(peak %in% tn_candidates$peak) %>% filter(height > height %>% max()/100)  %>% pull(position) %>% max())) %>% filter(!peak %in% c(tn_candidates %>% filter(position==min(position)) %>% pull(peak))) %>% arrange(peak) %>% mutate(pos = peaks$d.x[.$peak]) %>% mutate(max_others = rank(max_others)) %>% mutate(position = rank(-position)) %>% mutate(rank = max_others + position) %>% filter(rank == min(rank))
+    }else{
+      tn_candidates <- peak_info %>% filter(position==min(position))
+      tp_candidates <- peak_info %>% filter(position==max(position))
+    }
   }
 
   tn_peak <- peaks[tn_candidates %>% filter(max_others==min(max_others)) %>% filter(position==min(position)) %>% pull(peak) %>% as.character() %>% gsub("peak ", "", .) %>% as.numeric(),]
 
-  tp_peak <- peaks[tp_candidates %>% filter(max_others==min(max_others)) %>% filter(position==min(position)) %>% pull(peak) %>% as.character() %>% gsub("peak ", "", .) %>% as.numeric(),]
+  tp_peak <- peaks[tp_candidates %>% filter(position==min(position)) %>% filter(max_others==min(max_others)) %>% pull(peak) %>% as.character() %>% gsub("peak ", "", .) %>% as.numeric(),]
 
+  if(nrow(tn_peak)==1 & nrow(tp_peak)==1){
+    if(tn_peak$d.x==tp_peak$d.x){
+      tn_peak <- peaks[tn_candidates %>% filter(position==min(position)) %>% pull(peak) %>% as.character() %>% gsub("peak ", "", .) %>% as.numeric(),]
+      tp_peak <- peaks[tp_candidates %>% filter(position==max(position)) %>% pull(peak) %>% as.character() %>% gsub("peak ", "", .) %>% as.numeric(),]
+    }
+  }
   #define true positive and true negative peaks
 
   other_peaks <- peak_info %>% filter(!peak %in% (tp_candidates %>% pull(peak))) %>% filter(!peak %in% (tn_candidates %>% pull(peak)))
@@ -166,11 +199,11 @@ classify_peaks <- function(turnpoints, intensities, variable, channel_maxima, re
       channel_candidates <- other_peaks[opeak,] %>% select(ends_with("median"))
       channel_crosstalk <- colnames(channel_candidates)[which(channel_candidates == (other_peaks[opeak,] %>% pull(max_others)))] %>% gsub("_median", "", .)
 
-      if((other_peaks[opeak,] %>% pull(max_others)) > (other_peaks[opeak,] %>% pull(median_current))){
+      if((other_peaks[opeak,] %>% pull(max_others)) > (other_peaks[opeak,] %>% pull(!!sym(paste(variable, "_median", sep=""))))){
         peaks$crosstalk.peak[other_peaks[opeak,] %>% pull(peak) %>% as.character() %>% gsub("peak ", "", .) %>% as.numeric()] <- TRUE
-      }else{
-        print(paste("Crosstalk from", variable, "to", channel_crosstalk[[1]]))
-      }
+      }#else{
+        #print(paste("Crosstalk from", variable, "to", channel_crosstalk[[1]]))
+      #}
     }
   }
   if(nrow(tp_peak)>0){
@@ -305,18 +338,21 @@ setup <- function(){
   library(ggplot2)
   library(dplyr)
   library(openxlsx)
+
+  return(TRUE)
 }
 
 #' @title Analyze output of a QIAcuity experiment
 #' @description This function takes the files exported from the QIAcuity software for one or more experiments and analyzes them in an automated way.
 #' @param input_path path to where the .zip or .csv files exported from the QIAcuity software are saved. No files are written here. The function can handle multiple experiments saved in the same directory. It will always analyze all of them and create separate results for them.
 #' @param output_path path to where any results and plots should be saved. Directory for each experiment will be created there.
-#' @param coupled_channels Data frame containing any channels the targets of which are on the same chromosome or otherwise to be expecte in the same partitions
 #' @return A list containing a list of dataframes for each experiment.
 #' @details This function returns a list with an element for each experiment that was in the directory set by path. In each element there are the following data frames: The data for all channels in raw data, after baseline correction, cross talk correction and competition correction; cross talk and competition analyses that give an estimate of the magnitude of the effects the different reactions have on each other; thresholds gives the thresholds for each channel at each step; Volumes contains information about the total volume contained in the partitions of each well.
 
-QIAcuityAnalysis <- function(input_path, output_path, coupled_channels=data.frame(ch1=character(length=0), ch2=character(length=0))){
-
+QIAcuityAnalysis <- function(input_path, output_path, smooth=FALSE){
+  if(setup_conducted ==FALSE){
+    setup_conducted <- setup()
+  }
   setwd(input_path)
 
   files <- dir()
@@ -345,6 +381,8 @@ QIAcuityAnalysis <- function(input_path, output_path, coupled_channels=data.fram
   # for each experiment, do:
   for(k in 1:length(plates)){
     print(plates[k])
+    setwd(input_path)
+    writeLines("", con="errorLog.txt")
     # find all files with experiment name
     plate_files <- dir()[grep(plates[[k]], dir())]
     #if csv files among them, analyze those files (assumption: .zip has been unzipped!)
@@ -355,13 +393,14 @@ QIAcuityAnalysis <- function(input_path, output_path, coupled_channels=data.fram
       zip_file <- plate_files[grep(".zip", plate_files)]
       if(length(zip_file)==0){
         stop("Error: neither suitable .csv nor .zip file containing QIAcuity raw data were found.")
+        writeLines("Error: neither suitable .csv nor .zip file containing QIAcuity raw data were found.\n", con="errorLog.txt")
       }
       dirname <- paste(output_path, "\\plate ", k, "_", plates[[k]], sep="")
       dir.create(dirname)
       unzip(zip_file, exdir=dirname, overwrite = FALSE)
 
       setwd(dirname)
-      csv_files <- dir()[grep(".csv", dir())]
+      csv_files <- dir()[grep(paste(plates[[k]] %>% gsub("plate_\\d_", "", .), ".+", ".csv",sep=""), dir())]
       dataframes1 <- csv_files %>% lapply(., read.data.QIAcuity)
 
     }else{
@@ -370,9 +409,6 @@ QIAcuityAnalysis <- function(input_path, output_path, coupled_channels=data.fram
 
     # gather data and find baseline of all samples, calculate corrected RFU values
     raw_data <- data.frame(Well=character(length=0), Partition=numeric(length=0), Sample=character(length=0))
-
-    crosstalk_corrected <- data.frame(Well=character(length=0), Partition=numeric(length=0), Sample=character(length=0))
-    competition_corrected <- data.frame(Well=character(length=0), Partition=numeric(length=0), Sample=character(length=0))
 
     for(channel in 1:length(dataframes1)){
       #extract RFU data from raw csv files
@@ -386,304 +422,106 @@ QIAcuityAnalysis <- function(input_path, output_path, coupled_channels=data.fram
 
     channels <- raw_data %>% select(!Well) %>% select(!Partition) %>% select(!Sample) %>% colnames()
 
+    coupled_channels=data.frame(ch1=character(length=0), ch2=character(length=0))
+
     wells <- raw_data %>% pull(Well) %>% unique()
-
-    maxima <- raw_data %>% group_by(Well) %>% na.omit() %>% summarize_at(all_of(channels), max)
-
-    pc_wells <- mutate(maxima, overall = (maxima %>% select(!Well) %>% apply(., 1, min))) %>% filter(overall > max(overall) - (sd(overall)/2)) %>% pull(Well)
-
-    baseline_corrected <- raw_data
-
-    for(channel in 1:length(channels)){
-      # find true positive and negative peaks in PC
-      current_channel <- channels[[channel]]
-
-      tp_data <- raw_data %>% filter(Well %in% pc_wells) %>% select(!any_of(c("Well", "Partition", "Sample"))) %>% na.omit()
-
-      if(current_channel %in% coupled_channels){
-        exclude <- coupled_channels %>% filter(ch1 == current_channel | ch2 ==current_channel) %>% unlist() %>% unique()
-        exclude <- exclude[which(!exclude==current_channel)]
-
-        tp_data <- tp_data %>% select(!any_of(exclude))
-      }else{
-        exclude <- c()
-      }
-
-      turnpoints <- tp_data  %>% find_turnpoints(., variable=current_channel)
-      classified_turnpoints <- classify_peaks(turnpoints = turnpoints, intensities = tp_data, variable = current_channel, channel_maxima = tp_data %>% apply(., 2, max))
-
-      ref_peaks <- classified_turnpoints %>% filter(tp.peak == TRUE | tn.peak == TRUE)
-
-      # calculate baseline for each well
-      baseline <- data.frame(Well=wells, baseline= numeric(length=length(wells)))
-
-      for(well in 1:length(wells)){
-        # try to find threshold for each well guided by positive controls, limited by crosstalk signals
-        well_data <- raw_data %>% na.omit() %>% select(!any_of(exclude)) %>% filter(Well==wells[[well]])
-
-        #threshold_well <- well_data %>% density_threshold(., variable=current_channel, references = ref_peaks, pc_data = raw_data %>% filter(Well %in% pc_wells))
-
-        turnpoints_well <- well_data %>% select(!any_of(c("Well", "Sample", "Partition"))) %>% na.omit() %>% find_turnpoints(., variable=current_channel)
-        classified_turnpoints_well <- classify_peaks(turnpoints = turnpoints_well, intensities = well_data %>% select(!any_of(c("Well", "Sample", "Partition"))), variable = current_channel, channel_maxima = tp_data %>% apply(., 2, max), reference_peaks = ref_peaks)
-
-        tn_peak_well <- classified_turnpoints_well %>% filter(tn.peak == TRUE)
-        if(nrow(tn_peak_well)>0){
-          upper_lim <- classified_turnpoints_well %>% filter(d.x > tn_peak_well %>% pull(d.x)) %>% pull(d.x) %>% min()
-          lower_lim <- classified_turnpoints_well %>% filter(d.x < tn_peak_well %>% pull(d.x)) %>% pull(d.x) %>% max()
-        }else{
-          upper_lim <- 0
-          lower_lim <- 0
-        }
-
-        baseline_well <- well_data %>% filter(!!sym(current_channel) > lower_lim) %>% filter(!!sym(current_channel) < upper_lim) %>% select(any_of(current_channel)) %>% unlist() %>% median()
-
-        n_below <- well_data %>% filter(Well==wells[[well]]) %>% filter(!!sym(current_channel)<upper_lim) %>% nrow()
-        n_total <- well_data %>% filter(Well==wells[[well]]) %>% nrow()
-
-        # if too few negative partitions are present, proper baseline correction is impossible
-        if(n_below < n_total/10){
-          baseline$baseline[[well]] <- ref_peaks %>% filter(tn.peak == TRUE) %>% pull(d.x)
-        }else{
-          baseline$baseline[[well]] <- baseline_well
-        }
-      }
-      baseline_corrected <- baseline_corrected %>% select(any_of(c("Well", "Partition", "Sample", current_channel))) %>% merge(., baseline, by=c("Well")) %>% mutate(!!sym(current_channel) := !!sym(current_channel) - baseline) %>% select(!baseline) %>% full_join(baseline_corrected %>% select(!any_of(current_channel)))
-    }
-
-    #check for correlation between channels to prevent later errors!
-
-    cors <- raw_data %>% filter(Well %in% pc_wells) %>% select(!Well) %>% select(!Partition) %>% select(!Sample) %>% na.omit() %>% cor()
-    cors <- cors>0.4 & cors<1
-
-    row <-  (which(cors==TRUE)/ncol(cors)) %>% ceiling(.)
-    row[which(row == 0)] <- 1
-    col <-  which(cors==TRUE)%%ncol(cors)
-    col[which(col == 0)] <- ncol(cors)
-
-    pairs <- data.frame(ch1=colnames(cors)[col], ch2=rownames(cors)[row])
-
-    for(i in 1:nrow(pairs)){
-      pairs[i,] <- pairs[i,][order(pairs[i,])]
-    }
-
-    pairs <- pairs %>% unique() %>% na.omit() %>% data.frame()
-
-    #re-define thresholds for each channel that separate positive and negative samples
 
     thresholds <- data.frame(channel=channels, baseline=numeric(length=length(channels)), crosstalk = numeric(length=length(channels)), competition=numeric(length=length(channels)))
 
-    baseline_corrected_dichot <- baseline_corrected
+    maxima <- raw_data %>% group_by(Well) %>% na.omit() %>% summarize_at(channels, get_quantile, probs=0.999)
 
-    for(i in 1:length(channels)){
-      if(channels[[i]] %in% coupled_channels){
-        omit <- coupled_channels %>% filter(ch1==channels[[i]] | ch2 == channels[[i]]) %>% unlist() %>% unique()
-        comparison_channels <- channels[which(!channels %in% omit)]
+    pc_wells <- maxima %>% mutate(across(.cols=channels, .fns=function(x){return(x-min(x))})) %>% mutate(across(.cols=channels, .fns=function(x){return(x/max(x))}))  %>% mutate(minimum = apply(across(channels), 1, min)) %>% mutate(median = apply(across(channels), 1, median)) %>% filter(median == max(median) | minimum == max(minimum) | median == min(median)) %>% pull(Well) %>% unique()
 
-      }else{
-        comparison_channels <- channels[-i]
-      }
+    # do baseline correction for subtraction of background signal and removal of artifacts due to position effects
+    baseline_corrected <- try(baseline_correction(raw_data=raw_data, smooth=smooth, channels=channels, coupled_channels = coupled_channels, pc_wells=pc_wells))
 
-      threshold <- baseline_corrected %>% filter(Well %in% pc_wells) %>% select(any_of(c(channels[[i]], comparison_channels))) %>%  density_threshold(., variable=channels[[i]], min_dist = 0.2)
-
-      thresholds[which(thresholds$channel ==channels[[i]]), "baseline"]<- threshold
-
-      # make dichotomized dataset that just gives info on whether a partition is positive or not
-      baseline_corrected_dichot[,channels[[i]]] <- ifelse(baseline_corrected_dichot[,channels[[i]]] > threshold, 1, 0)
+    if(class(baseline_corrected) =="try-error"){
+      readLines(con="errorLog.txt") %>% append(c("Error: baseline correction failed. Message:", geterrmessage())) %>% writeLines(., con="errorLog.txt")
+      baseline_corrected <- raw_data
     }
+
+    #check for correlation between channels to prevent later errors!
+    maxima_baseline_c <- baseline_corrected %>% group_by(Well) %>% na.omit() %>% summarize_at(all_of(channels), get_quantile, probs=0.999)
+    tp_data <- baseline_corrected %>% filter(Well %in% pc_wells)
+    maxima_channels <- tp_data %>% select(any_of(channels)) %>% apply(., 2, max, na.rm=TRUE)
+    sd_channels <-  tp_data %>% select(any_of(channels)) %>% apply(., 2, sd, na.rm=TRUE)
+    for(i in 1:length(channels)){
+
+      tp <- tp_data %>% select(any_of(channels))  %>% find_turnpoints(., variable=channels[[i]])
+      classified_turnpoints <- classify_peaks(tp, channel_maxima = maxima_channels , variable=channels[[i]], intensities =tp_data %>% select(any_of(channels)))
+      true_pos <- classified_turnpoints %>% filter(tp.peak ==TRUE)
+      lower_lim <- classified_turnpoints %>% filter(d.x<true_pos %>% pull(d.x)) %>% filter(d.x==max(d.x)) %>% pull(d.x)
+      upper_lim <- classified_turnpoints %>% filter(d.x>true_pos %>% pull(d.x)) %>% filter(d.x==min(d.x)) %>% pull(d.x)
+
+      peak_data <- tp_data %>% filter(!!sym(channels[[i]])>lower_lim) %>% filter(!!sym(channels[[i]])<upper_lim) %>% summarize_at(all_of(channels[-i]), median)
+      peak_data <- peak_data + sd_channels[-i] -maxima_channels[-i]
+      peak_data <- peak_data[which(peak_data > 0)]
+      if(length(peak_data)>0){
+        for(j in 1:length(peak_data)){
+          pair <- data.frame(ch1=c(channels[i], names(peak_data)[j]), ch2=c(names(peak_data)[j], channels[i]))
+          coupled_channels <- coupled_channels %>% rbind(., pair)
+        }
+      }
+    }
+
+    coupled_channels <- coupled_channels %>% unique()
+
+    #define thresholds for each channel that separate positive and negative partitions
+    temp <- recalculate_thresholds(data=baseline_corrected, thresholds=thresholds, step="baseline", coupled_channels = coupled_channels)
+
+    baseline_corrected_dichot <- temp[[1]]
+    thresholds <- temp[[2]]
 
     # crosstalk correction using a linear model
+    temp <- try(crosstalk_correction(baseline_data = baseline_corrected, baseline_data_dichot = baseline_corrected_dichot, pc_wells = pc_wells, coupled_channels = coupled_channels, channels=channels, thresholds=thresholds))
+    crosstalk_corrected <- temp[[1]]
+    crosstalk_analysis <- temp[[2]]
 
-    crosstalk_corrected <- baseline_corrected
-    crosstalk_analysis = data.frame(ch1=character(length=0), ch2=character(length=0), cross_talk=numeric(length=0))
-
-    for(i in 1:length(channels)){
-
-      for(j in 1:length(channels)){
-
-        if(!i==j){
-          #PROBLEM: if channels are coupled (e.g. targets on same chromosome), the filtering would lead to massive loss of data; not filtering will lead to less clear data!
-          excluded=c()
-          if(nrow(coupled_channels)>0){
-            if(channels[[i]] %in% (coupled_channels %>%  unlist())){
-              excluded <- coupled_channels %>% filter(ch1==channels[[i]] | ch2==channels[[i]]) %>% unlist() %>% unique() %>% c(excluded, .)
-            }
-            if(channels[[j]] %in% (coupled_channels %>% unlist())){
-              excluded <- coupled_channels %>% filter(ch1==channels[[j]] | ch2==channels[[j]]) %>% unlist() %>% unique() %>% c(excluded, .)
-            }
-
-            if(channels[[i]] %in% excluded && channels[[j]] %in% excluded){
-              next()
-            }
-
-            if(channels[[j]] %in% coupled_channels){
-              #PROBLEM: if two channels are coupled and exert crosstalk, the script can interpret it as crosstalk from both!
-              # therefore, always only analyze the channel that is closer wavelength-wise
-
-              channel_order <- c("G", "Y", "O", "R", "C")
-              current_channel_pos <- which(channel_order ==channels[[i]])
-              comparison_channel_pos <- which(channel_order ==channels[[j]])
-              comp_coupled <- coupled_channels %>% filter(ch1==channels[[j]] | ch2 == channels[[j]]) %>% unlist()
-              comp_coupled <- comp_coupled[which(!comp_coupled==channels[[j]])]
-
-              coupled_channel_pos <- which(channel_order == comp_coupled)
-
-              if(abs(current_channel_pos - comparison_channel_pos)>abs(current_channel_pos - coupled_channel_pos)){
-                next()
-              }
-            }
-
-            excluded <- excluded[which(!excluded %in% channels[c(i,j)])] %>% unique()
-
-          }
-          if(length(excluded)==0){
-            excluded=c("PLACEHOLDER")
-          }
-
-          new_thresh_data <- baseline_corrected_dichot %>% select(!any_of(channels[[i]])) %>% select(!any_of(channels[[j]])) %>% select(!any_of(excluded)) %>% mutate(., sum := !!. %>% select(any_of(channels)) %>% rowSums(., na.rm = TRUE))  %>% filter(sum==0 | is.na(sum)==TRUE)  %>% select(Well, Partition) %>% left_join(., baseline_corrected) %>% na.omit()
-
-          crosstalk_threshold <- new_thresh_data %>% select(!any_of(excluded)) %>% filter(Well %in% pc_wells) %>% density_threshold(input_data = ., variable=channels[[i]])
-
-          negs <- new_thresh_data %>% filter(!!sym(channels[[i]])<crosstalk_threshold)
-
-          sp_points <- negs %>% filter(!!sym(channels[[j]]) > thresholds %>% filter(channel==channels[[j]]) %>% pull(baseline))
-
-          if(nrow(sp_points)<100){
-            print("Warning: fewer than 100 positive points found. Aborting crosstalk calculation")
-            next()
-          }
-
-          dn_points <- negs %>% filter(!!sym(channels[[j]]) < thresholds %>% filter(channel==channels[[j]]) %>% pull(baseline))
-
-          dn_med <- c(dn_points %>% pull(channels[[i]]) %>% median(na.rm=TRUE), dn_points %>% pull(channels[[j]]) %>% median(na.rm=TRUE))
-          sp_med <- c(sp_points %>% pull(channels[[i]]) %>% median(na.rm=TRUE), sp_points %>% pull(channels[[j]]) %>% median(na.rm=TRUE))
-
-          slope <- (sp_med[[1]] - dn_med[[1]])/(sp_med[[2]] - dn_med[[2]])
-          yintercept <- dn_med[[1]] - slope*dn_med[[2]]
-
-          crosstalk <- (baseline_corrected %>% pull(channels[[j]]))*slope + yintercept #predict(model_crosstalk, baseline_corrected)*(1-(corr_factor-1)^2)
-          crosstalk_analysis <- data.frame(ch1=channels[[j]], ch2=channels[[i]], cross_talk=slope) %>% bind_rows(., crosstalk_analysis)
-
-          crosstalk_corrected[,channels[[i]]] <- crosstalk_corrected[,channels[[i]]] - crosstalk
-        }
-      }
+    if(class(crosstalk_corrected) =="try-error"){
+      readLines(con="errorLog.txt") %>% append(c("Error: crosstalk correction failed. Message:", geterrmessage())) %>% writeLines(., con="errorLog.txt")
+      crosstalk_corrected <- baseline_corrected
+      crosstalk_analysis <- ""
     }
 
-    crosstalk_corrected_dichot <- crosstalk_corrected
-
-    for(i in 1:length(channels)){
-      if(channels[[i]] %in% coupled_channels){
-        omit <- coupled_channels %>% filter(ch1==channels[[i]] | ch2 == channels[[i]]) %>% unlist() %>% unique()
-        comparison_channels <- channels[which(!channels %in% omit)]
-
-      }else{
-        comparison_channels <- channels[-i]
-      }
-
-      pc_data_ct <- crosstalk_corrected %>% filter(Well %in% pc_wells)  %>% select(any_of(c(channels[[i]], comparison_channels)))
-      tps_ct <- find_turnpoints(pc_data_ct, variable=channels[[i]])
-      tps_ct <- classify_peaks(tps_ct, pc_data_ct, variable=channels[[i]], channel_maxima = apply(pc_data_ct, 2, max, na.rm=TRUE))
-      tn_peak <- tps_ct %>% filter(tn.peak ==TRUE)
-      threshold <- tps_ct %>% filter(d.x>tn_peak %>% pull(d.x)) %>% pull(d.x) %>% min(., na.rm=TRUE)
-
-      thresholds[which(thresholds$channel ==channels[[i]]), "crosstalk"]<- threshold
-
-      # make dichotomized dataset that just gives info on whether a partition is positive or not
-      crosstalk_corrected_dichot[,channels[[i]]] <- ifelse(crosstalk_corrected_dichot[,channels[[i]]] > threshold, 1, 0)
-    }
-
+    # calculate thresholds for new data
+    temp <- recalculate_thresholds(data=crosstalk_corrected, thresholds=thresholds, step="crosstalk", coupled_channels = coupled_channels)
+    crosstalk_corrected_dichot <- temp[[1]]
+    thresholds <- temp[[2]]
 
     # perform competition correction
-    competition_corrected <- crosstalk_corrected
-    competition_analysis <- list()
+    temp <- try(competition_correction(crosstalk_corrected=crosstalk_corrected, channels=channels, pc_wells=pc_wells, thresholds=thresholds))
 
-    for(i in 1:length(channels)){
-      for(j in 1:length(channels)){
-        if(!i==j){
+    competition_corrected <- temp[[2]]
+    competition_analysis <- temp[[1]]
 
-          pos <- crosstalk_corrected_dichot %>% filter(!!sym(channels[[i]]) == 1)
-
-          #PROBLEM: if channels are coupled (e.g. targets on same chromosome), the filtering would lead to massive loss of data; not filtering will lead to less clear data!
-          excluded=c()
-          if(nrow(coupled_channels)>0){
-            if(channels[[i]] %in% (coupled_channels %>%  unlist())){
-              excluded <- coupled_channels %>% filter(ch1==channels[[i]] | ch2==channels[[i]]) %>% unlist() %>% unique() %>% c(excluded, .)
-            }
-            if(channels[[j]] %in% (coupled_channels %>% unlist())){
-              excluded <- coupled_channels %>% filter(ch1==channels[[j]] | ch2==channels[[j]]) %>% unlist() %>% unique() %>% c(excluded, .)
-            }
-
-            if(channels[[i]] %in% excluded && channels[[j]] %in% excluded){
-              next()
-            }
-
-            if(channels[[i]] %in% (pairs %>%  unlist())){
-              excluded <- pairs %>% filter(ch1==channels[[i]] | ch2==channels[[i]]) %>% unlist() %>% unique() %>% c(excluded, .)
-            }
-            if(channels[[j]] %in% (pairs %>% unlist())){
-              excluded <- pairs %>% filter(ch1==channels[[j]] | ch2==channels[[j]]) %>% unlist() %>% unique() %>% c(excluded, .)
-            }
-
-            excluded <- excluded[which(!excluded %in% channels[c(i,j)])] %>% unique()
-
-
-          }
-          if(length(excluded)==0){
-            excluded=c("PLACEHOLDER")
-          }
-
-          pos <- pos %>% filter(!!sym(channels[[i]]) == 1) %>% select(!sym(channels[[i]])) %>% select(!sym(channels[[j]])) %>% select(!starts_with(excluded)) %>% mutate(., sum = !!. %>% select(!Well) %>% select(!Sample) %>% select(!Partition) %>% rowSums(., na.rm = TRUE))  %>% filter(sum==0)  %>% select(Well, Partition) %>% left_join(., crosstalk_corrected) %>% na.omit()
-
-          if(!max(pos[,channels[[j]]])<thresholds[which(thresholds$channel == channels[[j]]), "crosstalk"]){
-
-            ref <- pos %>% filter(!!sym(channels[[j]])<thresholds[which(thresholds$channel == channels[[j]]), "crosstalk"]) %>% pull(!!sym(channels[[i]])) %>% median()
-
-            train_data <- pos %>% mutate(!!sym(channels[[i]]):= !!sym(channels[[i]])- ref)
-
-            model_competition <- try(lm(get(channels[[i]]) ~ get(channels[[j]]), train_data))
-
-            if(!class(model_competition) == "try-error"){
-              corr_factor_r <- sqrt(summary(model_competition)$r.squared)
-              corr_factor_i <- crosstalk_corrected[,channels[[i]]]/(pos %>% filter(!!sym(channels[[j]])>thresholds[which(thresholds$channel == channels[[j]]), "crosstalk"]) %>% pull(!!sym(channels[[i]])) %>% get_quantile(0.99))
-
-              competition_raw <- predict(model_competition, crosstalk_corrected)
-
-              competition_corrected[,channels[[i]]] <- competition_corrected[,channels[[i]]] - competition_raw*(1-(corr_factor_i-1)^2)*(1-(corr_factor_r-1)^2)
-
-              competition_analysis <- data.frame(ch1=channels[[j]], ch2=channels[[i]], competition=model_competition$coefficients[[2]]) %>% bind_rows(., competition_analysis)
-
-
-            }else{
-              warning(paste("Competition estimation failed for comparison of channels", channels[[i]], "and", names(dataframes1)[[j]]))
-            }
-
-          }
-        }
-      }
+    if(class(competition_corrected) =="try-error"){
+      readLines(con="errorLog.txt") %>% append(c("Error: competition correction failed. Message:", geterrmessage())) %>% writeLines(., con="errorLog.txt")
+      competition_corrected <- crosstalk_corrected
+      competition_analysis <- ""
     }
 
-    competition_analysis <- bind_rows(competition_analysis)
+    #calculate
+    temp <- recalculate_thresholds(data=competition_corrected, thresholds=thresholds, step="competition", coupled_channels = coupled_channels)
+    competition_corrected_dichot <- temp[[1]]
+    thresholds <- temp[[2]]
 
-    # re-calculate thresholds
+    snr_vec <- c()
 
-    competition_corrected_dichot <- competition_corrected
-
+    # calculate SNRs for each channel
     for(i in 1:length(channels)){
-      # define which channels the data should be compared to
-      if(channels[[i]] %in% coupled_channels){
-        omit <- coupled_channels %>% filter(ch1==channels[[i]] | ch2 == channels[[i]]) %>% unlist() %>% unique()
-        comparison_channels <- channels[which(!channels %in% omit)]
+      pos <- competition_corrected %>% filter(!!sym(channels[[i]]) >= thresholds %>% filter(channel== channels[[i]]) %>% pull("competition")) %>% pull(channels[[i]])
+      neg <- competition_corrected %>% filter(!!sym(channels[[i]]) < thresholds %>% filter(channel== channels[[i]]) %>% pull("competition")) %>% pull(channels[[i]])
 
-      }else{
-        comparison_channels <- channels[-i]
-      }
+      signal <- median(pos) - median(neg)
+      noise <- mean(c(rep(sd(pos), times=length(pos)), rep(sd(neg), times=length(neg))))*2 + median(neg)
 
-      #calculate new threshold for this channel
-      threshold <- competition_corrected %>% filter(Well %in% pc_wells) %>% mutate(Sample=Well) %>% select(any_of(c(channels[[i]], comparison_channels))) %>%  density_threshold(., variable=channels[[i]], min_dist = 0.5)
+      SNR <- signal^2/noise^2
+      snr_vec[[i]] <- SNR
+      names(snr_vec)[[i]] <- channels[[i]]
+    }
 
-      thresholds[which(thresholds$channel ==channels[[i]]), "competition"]<- threshold
-
-      # make dichotomized dataset that just gives info on whether a partition is positive or not
-      competition_corrected_dichot[,channels[[i]]] <- ifelse(competition_corrected_dichot[,channels[[i]]] > threshold, 1, 0)
+    if(readLines("errorLog.txt") %>% nchar() == 0 ){
+      readLines(con="errorLog.txt") %>% append(c("Analysis completed successfully.")) %>% writeLines(., con="errorLog.txt")
     }
 
     output <- list(raw_data = raw_data, baseline_corrected = baseline_corrected, crosstalk_corrected=crosstalk_corrected, competition_corrected=competition_corrected, crosstalk_analysis=crosstalk_analysis, competition_analysis=competition_analysis, thresholds=thresholds)
@@ -691,6 +529,7 @@ QIAcuityAnalysis <- function(input_path, output_path, coupled_channels=data.fram
     # calculate volume
     vol_by_well = dataframes1 %>% bind_rows() %>% group_by(Well, Channel) %>% select(Well, starts_with("Cycled"), Channel)%>% unique()
     output$Volumes <- vol_by_well
+    output$snr <- snr_vec
     plate_results[[plates[[k]]]] <- output
   }
 
@@ -785,25 +624,28 @@ summarizeQIAcuityResult <- function(results, detailed_plots=TRUE, scatterplots_1
     }
     if(!j==1){
 
-      n_part <- channel_summaries %>% mutate(valid=positive + negative) %>% pull(valid)# %>% median(., na.rm = TRUE)
+      channel_summaries <- channel_summaries %>% mutate(positive=replace(positive, is.na(positive), 0)) %>% mutate(negative=replace(negative, is.na(negative), 0)) %>% mutate(valid=positive + negative)
 
       mm_vol <- 0
 
+      n_part <- channel_summaries %>% pull(valid)
+
       if(n_part %>% median(., na.rm = TRUE) > 10000){
-        mm_vol <- 40/26000*n_part
+        mm_vol <- 40/26000
       }else{
-        mm_vol <- 12/8500*n_part
+        mm_vol <- 12/8500
       }
+
 
       poisson.CI <- function(x){return(poisson.test(x)$conf.int %>% round(digits=1) %>% paste(., collapse=" - "))}
 
+      channel_summaries <- merge(channel_summaries, results[[i]]$Volumes, by=c("Well", "Channel")) %>% mutate(factor = (!!sym("Cycled volume") %>% as.numeric())/(mm_vol*valid))
 
 
       channel_summaries <- channel_summaries %>% mutate(CI=lapply(.$positive, poisson.CI)) %>% relocate(any_of(c("Sample", "Well", "Channel", "negative", "positive", "CI")))
 
       channel_summaries <- channel_summaries %>% mutate(Warning = ifelse(lapply(.$CI %>% as.character() %>% strsplit(split=" - "), min)<1 & .$positive > 0, "Warning: confidence interval contains values < 1, positive result may not be reliable.", NA) %>% paste(channel_summaries$Warning, sep=", ") %>% gsub("NA, NA", NA, .) %>% gsub("NA, ", "", .) %>% gsub(", NA", "", .))
 
-      channel_summaries <- merge(channel_summaries, results[[i]]$Volumes) %>% mutate(factor = (!!sym("Cycled volume") %>% as.numeric())/mm_vol)
 
       channel_summaries <- channel_summaries %>% mutate(poisson_corrected_targets = (poisson_corrected_targets/factor) %>% round(digits=2)) %>% mutate()
 
@@ -829,7 +671,254 @@ summarizeQIAcuityResult <- function(results, detailed_plots=TRUE, scatterplots_1
     write.xlsx(results[[i]]$crosstalk_analysis, file="crosstalk_analysis.xlsx")
     write.xlsx(results[[i]]$competition_analysis, file="competition_analysis.xlsx")
     write.xlsx(results[[i]]$thresholds, file="thresholds.xlsx")
-
+    write.xlsx(results[[i]]$snr %>% data.frame(), file="snr_competition_corrected.xlsx")
     setwd("..")
   }
+}
+
+smooth_data <- function(data, current_channel, upper_lim, lower_lim){
+
+  per_cluster <- list()
+
+  breakpoint_data <- data %>% filter(!!sym(current_channel)>lower_lim) %>% filter(!!sym(current_channel)<upper_lim)
+
+  frm <- formula(paste(current_channel, "~ s(Partition, bs='cs')"))
+
+  model <- mgcv::gam(frm, data=breakpoint_data)
+
+  breakpoint_data$predicted <- model$fitted.values
+  breakpoint_data <- breakpoint_data %>% arrange(Partition)
+  breakpoint_data$first_deriv <- (breakpoint_data$predicted - c(breakpoint_data$predicted[2:nrow(breakpoint_data)], NA))/(breakpoint_data$Partition - c(breakpoint_data$Partition[2:nrow(breakpoint_data)], NA))
+
+  tps <- turnpoints(breakpoint_data$first_deriv)
+  break_ID <- tps$tppos %>% na.omit()
+  breakpoint_pos <- breakpoint_data$Partition[break_ID]
+
+  breaks <- c(0, breakpoint_pos, data %>% pull(Partition) %>% max()) %>% unique()
+
+  for(p in 2:length(breaks)){
+    data_baseline_est <- breakpoint_data %>% filter(Partition > breaks[p-1]) %>% filter(Partition < breaks[p])
+
+    if(nrow(data_baseline_est)>10){
+      frm <- formula(paste(current_channel, "~ poly(Partition, 2)"))
+
+      model_baseline <- data_baseline_est %>% lm(frm, .)
+
+      pred <- predict(model_baseline, data %>% filter(Partition > breaks[p-1]) %>% filter(Partition <= breaks[p]))
+      pred <- data.frame(Partition=names(pred) %>% as.numeric(), RFU_temp = pred)
+
+      tempPerWell <- data %>% filter(Partition > breaks[p-1]) %>% filter(Partition <= breaks[p]) %>% mutate(!!sym(current_channel) := !!sym(current_channel) - pred$RFU_temp) %>% mutate(baseline=pred$RFU_temp)
+      per_cluster[[p]] <- tempPerWell
+    }else{
+      pred <- breakpoint_data %>% select(all_of(current_channel)) %>% unlist() %>% median()
+      tempPerWell <- data %>% filter(Partition > breaks[p-1]) %>% filter(Partition <= breaks[p]) %>% mutate(!!sym(current_channel) := !!sym(current_channel) - pred) %>% mutate(baseline=pred)
+      per_cluster[[p]] <- tempPerWell
+      }
+  }
+  output <- bind_rows(per_cluster)
+
+  return(output)
+}
+
+baseline_correction <- function(raw_data, smooth=TRUE, coupled_channels, channels, pc_wells){
+
+  for(channel in 1:length(channels)){
+    # find true positive and negative peaks in PC
+    current_channel <- channels[[channel]]
+    tp_data <- raw_data %>% filter(Well %in% pc_wells) %>% select(!any_of(c("Well", "Partition", "Sample"))) %>% na.omit()
+    wells <- raw_data %>% pull(Well) %>% unique()
+
+    if(current_channel %in% coupled_channels){
+      exclude <- coupled_channels %>% filter(ch1 == current_channel | ch2 ==current_channel) %>% unlist() %>% unique()
+      exclude <- exclude[which(!exclude==current_channel)]
+
+      tp_data <- tp_data %>% select(!any_of(exclude))
+    }else{
+      exclude <- c()
+    }
+
+    turnpoints <- tp_data  %>% find_turnpoints(., variable=current_channel)
+    classified_turnpoints <- classify_peaks(turnpoints = turnpoints, intensities = tp_data, variable = current_channel, channel_maxima = tp_data %>% apply(., 2, get_quantile, probs=0.999))
+
+    ref_peaks <- classified_turnpoints %>% filter(tp.peak == TRUE | tn.peak == TRUE)
+    if((ref_peaks %>% filter(tp.peak==TRUE) %>%nrow())==0){
+      tp_artif <- classified_turnpoints %>% filter(tp.peaks==TRUE) %>% filter(d.x > ref_peaks %>% filter(tn.peak=TRUE) %>% pull(d.x)) %>% filter(d.x==min(d.x)) %>% mutate(tp.peak=TRUE)
+      ref_peaks <- ref_peaks %>% rbind(., tp_artif)
+    }
+
+    # calculate baseline for each well
+    baseline <- data.frame(Well=character(length=0), Partition=character(length=0), baseline= numeric(length=0))
+
+    for(well in 1:length(wells)){
+      # try to find threshold for each well guided by positive controls, limited by crosstalk signals
+      well_data <- raw_data %>% na.omit() %>% select(!any_of(exclude)) %>% filter(Well==wells[[well]])
+
+      turnpoints_well <- well_data %>% select(!any_of(c("Well", "Sample", "Partition"))) %>% na.omit() %>% find_turnpoints(., variable=current_channel, n_points=15)
+      classified_turnpoints_well <- classify_peaks(turnpoints = turnpoints_well, intensities = well_data %>% select(!any_of(c("Well", "Sample", "Partition"))), variable = current_channel, channel_maxima = tp_data %>% apply(., 2, get_quantile, probs=0.999), reference_peaks = ref_peaks)
+
+      tn_peak_well <- classified_turnpoints_well %>% filter(tn.peak == TRUE)
+
+      if(nrow(tn_peak_well)>0){
+        upper_lim <- classified_turnpoints_well %>% filter(d.x > tn_peak_well %>% pull(d.x)) %>% pull(d.x) %>% min()
+        lower_lim <- classified_turnpoints_well %>% filter(d.x < tn_peak_well %>% pull(d.x)) %>% pull(d.x) %>% max()
+        datapoints <- well_data %>% filter(!!sym(current_channel) > lower_lim) %>% filter(!!sym(current_channel) < upper_lim) %>% nrow()
+      }else{
+        datapoints <- 0
+      }
+
+      if(nrow(tn_peak_well) == 0 | datapoints<(nrow(well_data)/100)){
+        baseline <- data.frame(Well=well_data$Well, Partition = well_data$Partition, baseline = ref_peaks %>% filter(tn.peak == TRUE) %>% pull(d.x)) %>% rbind(baseline, .)
+        warning(paste("Well", wells[[well]], ", Channel",  current_channel, ". Baseline estimation potentially failed. Please inspect data."))
+      }else{
+        if(smooth==TRUE){
+          baseline <- smooth_data(well_data, upper_lim = upper_lim, lower_lim= lower_lim, current_channel=current_channel) %>% select(Well, Partition, baseline) %>% rbind(baseline, .)
+        }else{
+          baseline_well <- well_data %>% filter(!!sym(current_channel) > lower_lim) %>% filter(!!sym(current_channel) < upper_lim) %>% select(any_of(current_channel)) %>% unlist() %>% median()
+          baseline <- data.frame(Well=well_data$Well, Partition = well_data$Partition, baseline = baseline_well) %>% rbind(baseline, .)
+        }
+      }
+    }
+
+    raw_data <- raw_data %>% select(any_of(c("Well", "Partition", "Sample", current_channel))) %>% merge(., baseline, by=c("Well", "Partition")) %>% mutate(!!sym(current_channel) := !!sym(current_channel) - baseline) %>% select(!baseline) %>% full_join(raw_data %>% select(!any_of(current_channel)))# %>% return()
+  }
+
+  return(raw_data)
+}
+
+recalculate_thresholds <- function(data, thresholds, step, coupled_channels){
+
+  #baseline_corrected_dichot <- baseline_corrected
+
+  maxima <- data %>% group_by(Well) %>% na.omit() %>% summarize_at(all_of(channels), get_quantile, probs=0.999)
+  pc_wells <- maxima %>% mutate(across(.cols=channels, .fns=function(x){return(x-min(x))})) %>% mutate(across(.cols=channels, .fns=function(x){return(x/max(x))}))  %>% mutate(minimum = apply(across(channels), 1, min)) %>% mutate(median = apply(across(channels), 1, median)) %>% filter(median == max(median) | minimum == max(minimum) | median == min(median)) %>% pull(Well) %>% unique()
+
+  channels <- thresholds$channel
+
+  for(i in 1:length(channels)){
+    comparison_channels <- channels[-i]
+    comparison_channels <- comparison_channels[which(!comparison_channels %in% (coupled_channels %>% unlist() %>% unique()))]
+
+    threshold <- data %>% filter(Well %in% pc_wells) %>% select(any_of(c(channels[[i]], comparison_channels))) %>%  density_threshold(., variable=channels[[i]], min_dist = 0.2)
+
+    thresholds[which(thresholds$channel ==channels[[i]]), step]<- threshold
+
+    # make dichotomized dataset that just gives info on whether a partition is positive or not
+    data[,channels[[i]]] <- ifelse(data[,channels[[i]]] > threshold, 1, 0)
+  }
+
+  return(list(data, thresholds))
+}
+
+
+crosstalk_correction <- function(baseline_data, baseline_data_dichot, pc_wells, coupled_channels, channels, thresholds){
+  crosstalk_corrected <- baseline_data
+  crosstalk_analysis = data.frame(ch1=character(length=0), ch2=character(length=0), cross_talk=numeric(length=0))
+
+  for(i in 1:length(channels)){
+    for(j in 1:length(channels)){
+      if(!i==j){
+
+        pc_data <- baseline_data %>% filter(Well %in% pc_wells)
+
+        filtered_points <- baseline_data_dichot %>% filter(Well %in% pc_wells)
+        excluded_channels <- coupled_channels %>% filter(ch1 %in% channels[c(i,j)] | ch2 %in% channels[c(i,j)]) %>% unlist() %>% unique()
+
+        filtered_points$sum <- filtered_points %>% select(any_of(channels)) %>% select(!any_of(channels[c(i,j)])) %>% select(!any_of(excluded_channels)) %>% apply(., 1, sum)
+        filtered_points <- filtered_points %>% filter(sum==0)
+
+        thr_ch2 <- thresholds %>% filter(channel == channels[[j]]) %>% pull(baseline)
+        thr_ch1 <- thresholds %>% filter(channel == channels[[i]]) %>% pull(baseline)
+
+        pc_data <- filtered_points %>% select(Well, Sample, Partition) %>% left_join(., pc_data)
+
+        turnpoints_channel <- pc_data %>% filter(!!sym(channels[[j]]) > thr_ch2) %>% select(any_of(channels[[i]])) %>% find_turnpoints(variable = channels[[i]])
+
+        turnpoints_channel_classified <- classify_peaks(turnpoints_channel, intensities = pc_data %>% select(any_of(channels)), variable=channels[[i]], channel_maxima = pc_data %>% select(any_of(channels)) %>% mutate(across(.cols=channels, .fns=max)) %>% unique())
+
+        tn_peak <- turnpoints_channel %>% mutate(height=rank(-d.y)) %>% filter(height < 3) %>% filter(d.x==min(d.x))
+
+        thr_ch1_ct <- turnpoints_channel %>% filter(d.x > tn_peak$d.x) %>% pull(d.x) %>% min()
+
+        sp_points <- pc_data %>% filter(!!sym(channels[[j]]) > thr_ch2) %>% filter(!!sym(channels[[i]]) < thr_ch1_ct)
+        sp_points_ch2 <- pc_data %>% filter(!!sym(channels[[j]]) < thr_ch2) %>% filter(!!sym(channels[[i]]) > thr_ch1_ct)
+
+        dp_points <- pc_data %>% filter(!!sym(channels[[i]]) > thr_ch1_ct) %>% filter(!!sym(channels[[j]]) > thr_ch2)
+
+        expected_dps <- nrow(pc_data) * ((nrow(sp_points) + nrow(dp_points))/nrow(pc_data)) * ((nrow(sp_points_ch2) + nrow(dp_points))/nrow(pc_data))
+
+        dn_points <- pc_data %>% filter(!!sym(channels[[j]]) < thr_ch2)  %>% filter(!!sym(channels[[i]]) < thr_ch1_ct)
+
+        if(nrow(dp_points)>expected_dps*100){
+          coupled_channels <- data.frame(ch1=channels[[i]], ch2=channels[[j]]) %>% rbind(coupled_channels)
+        }
+
+        if(nrow(sp_points)<100){
+          print("Warning: fewer than 100 positive points found. Aborting crosstalk calculation")
+          crosstalk_analysis <- data.frame(ch1=channels[[j]], ch2=channels[[i]], cross_talk=NA) %>% bind_rows(., crosstalk_analysis)
+          next()
+        }else{
+          dn_med <- c(dn_points %>% pull(channels[[i]]) %>% median(na.rm=TRUE), dn_points %>% pull(channels[[j]]) %>% median(na.rm=TRUE))
+          sp_med <- c(sp_points %>% pull(channels[[i]]) %>% median(na.rm=TRUE), sp_points %>% pull(channels[[j]]) %>% median(na.rm=TRUE))
+
+          slope <- (sp_med[[1]] - dn_med[[1]])/(sp_med[[2]] - dn_med[[2]])
+
+          if(slope>1){
+            break()
+          }
+
+          yintercept <- dn_med[[1]] - slope*dn_med[[2]]
+
+          crosstalk <- (crosstalk_corrected %>% pull(channels[[j]]))*slope + yintercept #predict(model_crosstalk, baseline_corrected)*(1-(corr_factor-1)^2)
+          crosstalk_analysis <- data.frame(ch1=channels[[j]], ch2=channels[[i]], cross_talk=slope) %>% bind_rows(., crosstalk_analysis)
+
+          crosstalk_corrected[,channels[[i]]] <- crosstalk_corrected[,channels[[i]]] - crosstalk
+        }
+      }
+    }
+  }
+  return(list(crosstalk_corrected, crosstalk_analysis))
+}
+
+competition_correction <- function(crosstalk_corrected, channels, pc_wells, thresholds){
+  competition_corrected <- crosstalk_corrected
+  competition_analysis = data.frame(ch1=character(length=0), ch2=character(length=0), competition=numeric(length=0))
+  for(i in 1:length(channels)){
+    for(j in 1:length(channels)){
+      if(!i==j){
+        pc_data <- competition_corrected %>% filter(Well %in% pc_wells)
+
+        thr_ch1 <- thresholds %>% filter(channel==channels[[i]]) %>% pull(crosstalk)
+        thr_ch2 <- thresholds %>% filter(channel==channels[[j]]) %>% pull(crosstalk)
+
+        sp_points <- pc_data %>% filter(!!sym(channels[[j]]) < thr_ch2) %>% filter(!!sym(channels[[i]]) > thr_ch1)
+        sp_points_ch2 <- pc_data %>% filter(!!sym(channels[[j]]) > thr_ch2) %>% filter(!!sym(channels[[i]]) < thr_ch1)
+
+        dp_points <- pc_data %>% filter(!!sym(channels[[i]]) > thr_ch1) %>% filter(!!sym(channels[[j]]) > thr_ch2)
+
+        expected_dps <- nrow(pc_data) * ((nrow(sp_points) + nrow(dp_points))/nrow(pc_data)) * ((nrow(sp_points_ch2) + nrow(dp_points))/nrow(pc_data))
+
+        dn_points <- pc_data %>% filter(!!sym(channels[[j]]) < thr_ch2)  %>% filter(!!sym(channels[[i]]) < thr_ch1)
+
+        if(nrow(dp_points)<10){
+          print("Warning: fewer than 10 double positive points found. Aborting competition calculation")
+          next()
+        }
+
+        dp_med <- c(dp_points %>% pull(channels[[i]]) %>% median(na.rm=TRUE), dp_points %>% pull(channels[[j]]) %>% median(na.rm=TRUE))
+        sp_med <- c(sp_points %>% pull(channels[[i]]) %>% median(na.rm=TRUE), sp_points %>% pull(channels[[j]]) %>% median(na.rm=TRUE))
+        dn_med <- c(dn_points %>% pull(channels[[i]]) %>% median(na.rm=TRUE), dn_points %>% pull(channels[[j]]) %>% median(na.rm=TRUE))
+
+        slope <- (sp_med[[1]] - dp_med[[1]])/(sp_med[[2]] - dp_med[[2]])
+
+        max_ch1 <- max(dp_points %>% pull(channels[[i]]))
+
+        competition <- ((competition_corrected %>% pull(channels[[j]]))*slope)* ((crosstalk_corrected %>% pull(channels[[i]])) /max_ch1) #predict(model_crosstalk, baseline_corrected)*(1-(corr_factor-1)^2)
+        competition_analysis <- data.frame(ch1=channels[[j]], ch2=channels[[i]], competition=slope) %>% bind_rows(., competition_analysis)
+
+        competition_corrected[,channels[[i]]] <- competition_corrected[,channels[[i]]] - competition
+
+      }
+    }
+  }
+  return(list(competition_analysis, competition_corrected))
 }
