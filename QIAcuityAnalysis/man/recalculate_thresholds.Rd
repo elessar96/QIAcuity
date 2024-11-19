@@ -4,7 +4,16 @@
 \alias{recalculate_thresholds}
 \title{Calculate thresholds for input data and dichotomize it}
 \usage{
-recalculate_thresholds(data, thresholds, step, coupled_channels)
+recalculate_thresholds(
+  data,
+  thresholds,
+  step,
+  coupled_channels,
+  min_dist = 0.2,
+  mid = FALSE,
+  pc_wells,
+  noise_suppression_strict = TRUE
+)
 }
 \arguments{
 \item{data}{The fluorescence data from QIAcuity}
@@ -14,6 +23,8 @@ recalculate_thresholds(data, thresholds, step, coupled_channels)
 \item{step}{Column of the data frame where the data should be stored.}
 
 \item{coupled_channels}{Defines which channels are highly correlated.}
+
+\item{min_dist}{Minimum distance of the threshold to negative band relative to difference between negative and positive band (0.2 = 20\% of the difference between the negative and positive band is the minimum distance between negative band and threshold)}
 }
 \value{
 Returns a list of (1) the thresholds and (2) the data, transformed to 0 or 1 depending on whether the fluorescence value exceeds the threshold

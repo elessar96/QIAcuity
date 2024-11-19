@@ -4,7 +4,13 @@
 \alias{competition_correction}
 \title{Perform competition correction}
 \usage{
-competition_correction(crosstalk_corrected, channels, pc_wells, thresholds)
+competition_correction(
+  crosstalk_corrected,
+  channels,
+  pc_wells,
+  thresholds,
+  step
+)
 }
 \arguments{
 \item{crosstalk_corrected}{The crosstalk corrected fluorescence data from QIAcuity}

@@ -9,7 +9,8 @@ baseline_correction(
   smooth = TRUE,
   coupled_channels,
   channels,
-  pc_wells
+  pc_wells,
+  thresholds
 )
 }
 \arguments{
