@@ -8,9 +8,22 @@
 #' @param pc_data Positive control data as a reference to calculate maximum expected values for each channel
 #' @return A numeric value giving the optimal threshold for distinguishing the true positive and true negative populations in the data.
 
-density_threshold <- function(input_data, variable, min_dist=0.2, references=NULL, pc_data =NULL, mid=FALSE, thresholds, step, coupled_channels=data.frame(ch1=character(length=0), ch2=character(length=0)), recalc = FALSE, noise_suppression_strict =TRUE){
+density_threshold <- function(input_data,
+                              variable,
+                              min_dist=0.2,
+                              references=NULL,
+                              pc_data =NULL,
+                              mid=FALSE,
+                              thresholds,
+                              step,
+                              coupled_channels=data.frame(ch1=character(length=0), ch2=character(length=0)),
+                              recalc = FALSE,
+                              noise_suppression_strict =TRUE,
+                              force_two_peaks = FALSE){
 
-  data_subset <- input_data %>% select(!any_of(c("Well", "Sample", "Partition"))) %>% na.omit()
+  data_subset <- input_data %>%
+    select(!any_of(c("Well", "Sample", "Partition"))) %>%
+    filter(!is.na(!!sym(variable)))
 
   # find turnpoints
   tp_df <- find_turnpoints(data_subset, variable=variable)
@@ -23,11 +36,22 @@ density_threshold <- function(input_data, variable, min_dist=0.2, references=NUL
 
   channel_maxima <- pc_data %>% apply(., 2, get_quantile, probs=0.999)
   channel_minima <- pc_data %>% apply(., 2, get_quantile, probs=0.001)
+
   if((channel_maxima/channel_minima) %>% min() <1.5){
     channel_maxima <- pc_data %>% apply(., 2, get_quantile, probs=1-(5/26000))
   }
   # find true positives and negatives
-  classified_turnpoints <- classify_peaks(tp_df, intensities = data_subset , channel_maxima = channel_maxima, variable=variable, reference_peaks = references, thresholds = thresholds, step = step, coupled_channels=coupled_channels, recalc, noise_suppression_strict = noise_suppression_strict)
+  classified_turnpoints <- classify_peaks(tp_df,
+                                          intensities = data_subset,
+                                          channel_maxima = channel_maxima,
+                                          variable=variable,
+                                          reference_peaks = references,
+                                          thresholds = thresholds,
+                                          step = step,
+                                          coupled_channels=coupled_channels,
+                                          recalc,
+                                          noise_suppression_strict = noise_suppression_strict,
+                                          force_two_peaks = TRUE)
 
   #determine position of threshold
   positions <- data.frame(tp=NA, tn=NA, ct=NA)
@@ -78,7 +102,11 @@ density_threshold <- function(input_data, variable, min_dist=0.2, references=NUL
     min_thresh <- classified_turnpoints %>% filter(tp.pits==TRUE) %>% min()
   }
 
-  threshold <- classified_turnpoints %>% filter(tp.pits == TRUE) %>% filter(d.x > min_thresh) %>% filter(d.x == min(d.x)) %>% pull(d.x)
+  threshold <- classified_turnpoints %>%
+    filter(tp.pits == TRUE) %>%
+    filter(d.x > min_thresh) %>%
+    filter(d.x == min(d.x)) %>%
+    pull(d.x)
 
   if(is.finite(positions$tp) & is.finite(positions$tn)){
     dist <- (threshold-positions$tn)/(positions$tp-positions$tn)
@@ -111,17 +139,31 @@ density_threshold <- function(input_data, variable, min_dist=0.2, references=NUL
 #' @return A dataframe with turnpoints
 
 
-classify_peaks <- function(turnpoints, intensities, variable, channel_maxima, reference_peaks=NULL, thresholds, step, coupled_channels=data.frame(ch1=character(length=0), ch2=character(length=0)), recalc = FALSE, noise_suppression_strict = TRUE){
+classify_peaks <- function(turnpoints,
+                           intensities,
+                           variable,
+                           channel_maxima,
+                           reference_peaks=NULL,
+                           thresholds,
+                           step,
+                           coupled_channels=data.frame(ch1=character(length=0), ch2=character(length=0)),
+                           recalc = FALSE,
+                           noise_suppression_strict = TRUE,
+                           force_two_peaks = FALSE){
   # find peaks and pits
   peaks <- turnpoints %>% filter(tp.peaks) %>% arrange(d.x)
   pits <- turnpoints %>% filter(tp.pits)
 
-  peak_info <- mutate(intensities, peak=cut(intensities %>% pull(variable) %>% as.numeric(),breaks=pits$d.x, labels=paste("peak", c(1:nrow(peaks))))) %>% na.omit()
+  if(nrow(peaks) > 1){
+    peak_info <- mutate(intensities, peak=cut(intensities %>% pull(variable) %>% as.numeric(), breaks=pits$d.x, labels=paste("peak", c(1:nrow(peaks))))) %>% na.omit()
+  }else{
+    peak_info <- intensities %>% mutate(peak = "peak 1")
+  }
 
   #normalize intensity data
   channels <- colnames(intensities)
-  for(chan in 1: length(channels)){
-    peak_info[,channels[[chan]]] <- peak_info[,channels[[chan]]]/channel_maxima[channels[[chan]]]
+  for(chan in 1:length(channels)){
+    peak_info[,channels[[chan]]] <- peak_info[, channels[[chan]]]/channel_maxima[channels[[chan]]]
   }
   if(noise_suppression_strict ==TRUE){
 
@@ -155,14 +197,22 @@ classify_peaks <- function(turnpoints, intensities, variable, channel_maxima, re
 
   # add position and height info
   peak_indices <- peak_info %>% pull(peak) %>% gsub("peak ", "", .) %>% as.numeric()
-  peak_info <- peak_info %>% mutate(position=peaks$d.x[peak_indices]) %>% mutate(height=peaks$d.y[peak_indices])
+  peak_info <- peak_info %>%
+    mutate(position=peaks$d.x[peak_indices]) %>%
+    mutate(height=peaks$d.y[peak_indices])
 
   #summarize crosstalk from other channels
-  peak_info <- peak_info %>% mutate(across(matches("median"), .fns = function(x){return(x-min(abs(x), na.rm=TRUE))})) %>%
+  peak_info <- peak_info %>%
+    mutate(across(matches("median"), .fns = function(x){return(x-median(abs(x), na.rm=TRUE))})) %>%
     mutate(max_others = select(., !starts_with(variable)) %>%
              select(ends_with("median")) %>% apply(., 1, max))
+
   # rank intensity in current channel
-  peak_info <- peak_info %>% mutate(median_current = peak_info %>% select(starts_with(variable)) %>% select(ends_with("median")) %>% unlist())
+  peak_info <- peak_info %>%
+    mutate(median_current = peak_info %>%
+             select(starts_with(variable)) %>%
+             select(ends_with("median")) %>%
+             unlist())
 
   # identify crosstalk peaks based on number of partitions positive in other channels
   if(recalc){
@@ -171,7 +221,7 @@ classify_peaks <- function(turnpoints, intensities, variable, channel_maxima, re
       mutate(rank_others = rank(max_others)) %>%
       filter(rank_others < 3) %>%
       pull(max_others) %>%
-      max()+ 0.1
+      max() + 0.1
 
     non_ct_peaks <- peak_info %>% filter(max_others < ct_threshold )
 
@@ -213,8 +263,11 @@ classify_peaks <- function(turnpoints, intensities, variable, channel_maxima, re
         }
 
         if(nrow(ct_peaks)>0){
-          ct_info_add <- data.frame(peak=ct_peaks %>% pull(peak), channel_from = channels[[comp_channel]], channel_to = variable)
-          ct_info <- ct_info_add %>% full_join(., ct_info)
+          ct_info_add <- data.frame(peak=ct_peaks %>% pull(peak),
+                                    channel_from = channels[[comp_channel]],
+                                    channel_to = variable)
+          ct_info <- ct_info_add %>%
+            full_join(., ct_info)
 
         }
       }
@@ -251,7 +304,7 @@ classify_peaks <- function(turnpoints, intensities, variable, channel_maxima, re
             filter(d.x != associated_peak_high %>% pull(position))
 
           peaks <- peaks %>%
-            full_join(joined_peak %>% select(height, position) %>% rename(d.y = height, d.x = position) %>% mutate(tp.peaks = TRUE, tp.pits = FALSE)) %>%
+            full_join(joined_peak %>% select(height, position) %>% dplyr::rename(d.y = height, d.x = position) %>% mutate(tp.peaks = TRUE, tp.pits = FALSE)) %>%
             arrange(d.x)
 
           peak_info <- peak_info %>%
@@ -299,7 +352,10 @@ classify_peaks <- function(turnpoints, intensities, variable, channel_maxima, re
   }
 
   # for the true positive band: consider only bands that are not crosstalk peaks and have a high fluorescence intensity
-  tp_candidates <- peak_info %>% filter(!peak %in% tn_peak$peak) %>% filter(!ct_peak) %>% filter(dist_up < dist_low) %>%
+  tp_candidates <- peak_info %>%
+    filter(!peak %in% tn_peak$peak) %>%
+    filter(!ct_peak) %>%
+    filter(dist_up < dist_low) %>%
     mutate(max_others_rank = rank(max_others)) %>% mutate(height_rank = rank(-height)) %>% mutate(dist_up_rank = rank(dist_up)) %>% mutate(rank = max_others_rank + 2*dist_up_rank + 0.5*height_rank) %>%
     filter(rank == min(rank, na.rm=TRUE))
 
@@ -321,19 +377,37 @@ classify_peaks <- function(turnpoints, intensities, variable, channel_maxima, re
     }
   }
 
-  tn_peak <- tn_peak %>% select(height, position) %>% rename(d.y = height, d.x = position) %>% mutate(tp.peaks = TRUE, tp.pits = FALSE)
-  tp_peak <- tp_peak %>% select(height, position) %>% rename(d.y = height, d.x = position) %>% mutate(tp.peaks = TRUE, tp.pits = FALSE)
+  tn_peak <- tn_peak %>%
+    select(height, position) %>%
+    dplyr::rename(d.y = "height", d.x = "position") %>%
+    mutate(tp.peaks = TRUE, tp.pits = FALSE)
+
+  tp_peak <- tp_peak %>%
+    select(height, position) %>%
+    dplyr::rename(d.y = "height", d.x = "position") %>%
+    mutate(tp.peaks = TRUE, tp.pits = FALSE)
 
   if(nrow(tn_peak)==1 & nrow(tp_peak)==1){
     if(tn_peak$d.x==tp_peak$d.x){
       tn_peak <- peaks[tn_candidates %>% filter(position==min(position, na.rm=TRUE)) %>% pull(peak) %>% as.character() %>% gsub("peak ", "", .) %>% as.numeric(),]
       tp_peak <- peaks[tp_candidates %>% filter(position==max(position, na.rm=TRUE)) %>% pull(peak) %>% as.character() %>% gsub("peak ", "", .) %>% as.numeric(),]
     }
+  }else{
+    if(nrow(peak_info)>1 & force_two_peaks){
+      tn_peak <- peaks %>%
+        mutate(d.y = rank(-d.y)) %>%
+        filter(d.y <= 2) %>%
+        filter(d.x == min(d.x, na.rm = TRUE))
+      tp_peak <- peaks %>%
+        mutate(d.y = rank(-d.y)) %>%
+        filter(d.y <= 2) %>%
+        filter(d.x == max(d.x, na.rm = TRUE))
+    }
   }
 
   peaks <- peaks %>%
     mutate(peak=1:nrow(peaks)) %>%
-    full_join(peak_info %>% rename(d.x = "position") %>%
+    full_join(peak_info %>% dplyr::rename(d.x = "position") %>%
     select(d.x, ct_peak)) %>%
     select(!peak) %>%
     filter(!is.na(d.x))

@@ -25,14 +25,19 @@ setup <- function(){
   if(!require("pastecs", quietly=TRUE))
     install.packages("pastecs")
 
-  library(pastecs)
+  if(!require("DescTools", quietly=TRUE))
+    install.packages("DescTools")
 
+  library(pastecs)
+  library(DescTools)
   library(tidyr)
   library(tidyverse)
   library(ggplot2)
-  library(dplyr)
+
   library(openxlsx)
   library(gtools)
+
+  library(dplyr)
 
   return(TRUE)
 }
@@ -48,7 +53,12 @@ setup <- function(){
 #' @details This function returns a list with an element for each experiment that was in the directory set by path. In each element there are the following data frames: The data for all channels in raw data, after baseline correction, cross talk correction and competition correction; cross talk and competition analyses that give an estimate of the magnitude of the effects the different reactions have on each other; thresholds gives the thresholds for each channel at each step; Volumes contains information about the total volume contained in the partitions of each well.
 
 
-QIAcuityAnalysis <- function(input_path, output_path, noise_suppression_strict = TRUE){
+QIAcuityAnalysis <- function(input_path,
+                             output_path,
+                             noise_suppression_strict = TRUE,
+                             perform_crosstalk_correction = TRUE,
+                             perform_competition_correction = TRUE){
+
   if(setup_conducted ==FALSE){
     setup_conducted <- setup()
   }
@@ -123,15 +133,23 @@ QIAcuityAnalysis <- function(input_path, output_path, noise_suppression_strict =
     # gather data and find baseline of all samples, calculate corrected RFU values
     raw_data <- data.frame(Well=character(length=0), Partition=numeric(length=0), Sample=character(length=0))
 
+    reference_data <- NULL
+
     for(channel in 1:length(data_list)){
       #extract RFU data from raw csv files
       channel_data <- data_list[[channel]]
       channel_data <- channel_data %>% data.frame() %>% mutate(RFU=RFU %>% as.numeric()) %>%
                           group_by(Well) %>% mutate(Partition=Partition %>% as.numeric())
+      if(!"Channel" %in% colnames(channel_data)){
+        reference_data <- channel_data
+      }else{
+        #put those RFU values into one dataframe (that contains the data of all channels)
+        raw_data <- channel_data %>%
+          select(Well, Sample, Partition, RFU) %>%
+          merge(., raw_data, all=TRUE, by=c("Well", "Sample", "Partition"))
+        colnames(raw_data)[which(colnames(raw_data)=="RFU")] <- channel_data %>% pull(Channel) %>% unique()
+      }
 
-      #put those RFU values into one dataframe (that contains the data of all channels)
-      raw_data <- channel_data %>% select(Well, Sample, Partition, RFU) %>% merge(., raw_data, all=TRUE, by=c("Well", "Sample", "Partition"))
-      colnames(raw_data)[which(colnames(raw_data)=="RFU")] <- channel_data %>% pull(Channel) %>% unique()
     }
 
     channels <- raw_data %>% select(!Well) %>% select(!Partition) %>% select(!Sample) %>% colnames()
@@ -142,21 +160,37 @@ QIAcuityAnalysis <- function(input_path, output_path, noise_suppression_strict =
 
     thresholds <- data.frame(channel=channels, raw=numeric(length=length(channels)), baseline=numeric(length=length(channels)), crosstalk = numeric(length=length(channels)), competition=numeric(length=length(channels)))
 
-    maxima <- raw_data %>% group_by(Well) %>% na.omit() %>% summarize_at(channels, get_quantile, probs=0.999)
+    maxima <- raw_data %>% group_by(Well) %>% na.omit() %>% summarize_at(channels, get_quantile, probs=0.9999)
 
     rel_maxima <- maxima %>% mutate(across(.cols=all_of(channels), .fns=function(x){return(x-min(x))})) %>%
       mutate(across(.cols=all_of(channels), .fns=function(x){return(x/max(x))}))  %>% mutate(minimum = apply(across(all_of(channels)), 1, min)) %>%
       mutate(median = apply(across(all_of(channels)), 1, median)) %>%
       mutate(average = apply(across(all_of(channels)), 1, mean))
 
-    pc_wells <- rel_maxima %>% filter(median == max(median) | minimum == max(minimum) | average > max(average)*0.7) %>% pull(Well) %>% unique()
-    min_fluorescence <- rel_maxima %>% filter(Well %in% pc_wells) %>% select(any_of(channels)) %>% apply(., 2, max) %>% min()
+    pc_wells <- rel_maxima %>% filter(minimum == max(minimum)) %>% pull(Well) %>% unique()
+    min_fluorescence <- rel_maxima %>%
+      filter(Well %in% pc_wells) %>%
+      select(any_of(channels)) %>%
+      apply(., 2, max) %>%
+      min()
 
-    if(min_fluorescence < 0.7){
-      pc_wells <- c()
-      for(channel_pc_detection in 1:length(channels)){
-        pc_wells <- c(pc_wells, rel_maxima %>% filter(!!sym(channels[[channel_pc_detection]]) == max(!!sym(channels[[channel_pc_detection]]))) %>% pull(Well))
+    if(min_fluorescence < 0.6){
+
+      maxima <- rel_maxima %>%
+        filter(Well %in% pc_wells) %>%
+        select(any_of(channels)) %>%
+        t() %>%
+        apply(., 1, max, na.rm = TRUE)
+
+      channel_tests <- channels[which(maxima < 0.7)]
+
+      for(channel_pc_detection in 1:length(channel_tests)){
+        new_pc <- rel_maxima %>%
+          filter(!!sym(channel_tests[[channel_pc_detection]]) == max(!!sym(channel_tests[[channel_pc_detection]]))) %>%
+          pull(Well)
+        pc_wells <- c(pc_wells, new_pc) %>% unique()
       }
+
       readLines(con=paste(input_path, "Log.txt", sep="\\")) %>% append("Error: No valid positive control found. Positive wells for each channel will be searched on the plate to create composite data instead.") %>% writeLines(., con=paste(input_path, "Log.txt", sep="\\"))
     }
 
@@ -166,20 +200,7 @@ QIAcuityAnalysis <- function(input_path, output_path, noise_suppression_strict =
       thresholds <- raw_thresh[[2]]
       raw_data_dichot <- raw_thresh[[1]]
     }
-
-    #pc_wells <- raw_data_dichot %>%
-    #  pivot_longer(., cols = channels) %>%
-    #  filter(!is.na(value)) %>%
-    #  filter (value == 1) %>%
-    #  group_by(Well, name) %>%
-    #  summarize(n = n()) %>%
-    #  ungroup() %>%
-    #  group_by(Well) %>%
-    #  summarize(median = median(n), min = min(n)) %>%
-    #  filter(min == max(min)) %>%
-    #  pull(Well)
-
-    #check for link between channels to prevent later errors!
+  #check for link between channels to prevent later errors!
 
     pc_data <-  raw_data %>% filter(Well %in% pc_wells) %>% na.omit()
 
@@ -208,8 +229,9 @@ QIAcuityAnalysis <- function(input_path, output_path, noise_suppression_strict =
           dp_rate = nrow(dp_rate)/nrow(pc_data)
 
           max_expected_dp_rate = sqrt(pos_rate_ch1 * pos_rate_ch2)
-          ch1ch2_corr <- cor(pc_data %>% select(!!sym(channels[[channel1]])), pc_data %>% select(!!sym(channels[[channel2]]))) %>% abs()
-          if(dp_rate > max_expected_dp_rate | dp_rate > sp_rate_ch1*3 | dp_rate > sp_rate_ch2*3 | ch1ch2_corr > 0.4){
+          ch1ch2_corr <- CCC( x = pc_data %>% pull(!!sym(channels[[channel1]])),
+                              y = pc_data %>% pull(!!sym(channels[[channel2]])))$rho.c$est %>% abs()
+          if(dp_rate > max_expected_dp_rate | ch1ch2_corr > 0.5){
             coupled_channels <- coupled_channels %>% rbind(., data.frame(ch1=channels[[channel1]], ch2=channels[[channel2]]))
           }
 
@@ -218,6 +240,8 @@ QIAcuityAnalysis <- function(input_path, output_path, noise_suppression_strict =
       }
     }
     coupled_channels <- coupled_channels %>% unique()
+
+    #if(nrow(coupled_channels) > length(channels)^2)
 
     # do baseline correction for subtraction of background signal and removal of artifacts due to position effects
     baseline_corrected <- try(baseline_correction(raw_data=raw_data, smooth=TRUE, channels=channels, coupled_channels = coupled_channels, pc_wells=pc_wells, thresholds = thresholds))
@@ -233,16 +257,23 @@ QIAcuityAnalysis <- function(input_path, output_path, noise_suppression_strict =
     baseline_corrected_dichot <- temp[[1]]
     thresholds <- temp[[2]]
 
-    # crosstalk correction using a linear model
-    temp <- try(crosstalk_correction(baseline_data = baseline_corrected, baseline_data_dichot = baseline_corrected_dichot, pc_wells = pc_wells, coupled_channels = coupled_channels, channels=channels, thresholds=thresholds))
+    if(perform_crosstalk_correction){
+      # crosstalk correction using a linear model
+      temp <- try(crosstalk_correction(baseline_data = baseline_corrected, baseline_data_dichot = baseline_corrected_dichot, pc_wells = pc_wells, coupled_channels = coupled_channels, channels=channels, thresholds=thresholds))
 
-    if(class(temp) =="try-error"){
-      readLines(con=paste(input_path, "Log.txt", sep="\\")) %>% append(c("Error: crosstalk correction failed. Message:", geterrmessage())) %>% writeLines(., con=paste(input_path, "Log.txt", sep="\\"))
+      if(class(temp) =="try-error"){
+        readLines(con=paste(input_path, "Log.txt", sep="\\")) %>% append(c("Error: crosstalk correction failed. Message:", geterrmessage())) %>% writeLines(., con=paste(input_path, "Log.txt", sep="\\"))
+        crosstalk_corrected <- baseline_corrected
+        crosstalk_analysis <- ""
+      }else{
+        crosstalk_corrected <- temp[[1]]
+        crosstalk_analysis <- temp[[2]]
+      }
+    }else{
+      readLines(con=paste(input_path, "Log.txt", sep="\\")) %>% append(c("Crosstalk correction skipped.")) %>% writeLines(., con=paste(input_path, "Log.txt", sep="\\"))
+
       crosstalk_corrected <- baseline_corrected
       crosstalk_analysis <- ""
-    }else{
-      crosstalk_corrected <- temp[[1]]
-      crosstalk_analysis <- temp[[2]]
     }
 
     # calculate thresholds for new data
@@ -251,17 +282,21 @@ QIAcuityAnalysis <- function(input_path, output_path, noise_suppression_strict =
     thresholds <- temp[[2]]
 
     # perform competition correction
-    temp <- try(competition_correction(crosstalk_corrected=crosstalk_corrected, channels=channels, pc_wells=pc_wells, thresholds=thresholds, step="competition"))
+    if(perform_competition_correction){
+      temp <- try(competition_correction(crosstalk_corrected=crosstalk_corrected, channels=channels, pc_wells=pc_wells, thresholds=thresholds, step="competition"))
 
-    if(class(temp) =="try-error"){
-      readLines(con=paste(input_path, "Log.txt", sep="\\")) %>% append(c("Error: competition correction failed. Message:", geterrmessage())) %>% writeLines(., con=paste(input_path, "Log.txt", sep="\\"))
+      if(class(temp) =="try-error"){
+        readLines(con=paste(input_path, "Log.txt", sep="\\")) %>% append(c("Error: competition correction failed. Message:", geterrmessage())) %>% writeLines(., con=paste(input_path, "Log.txt", sep="\\"))
+        competition_corrected <- crosstalk_corrected
+        competition_analysis <- ""
+      }else{
+        competition_corrected <- temp[[2]]
+        competition_analysis <- temp[[1]]
+      }
+    }else{
       competition_corrected <- crosstalk_corrected
       competition_analysis <- ""
-    }else{
-      competition_corrected <- temp[[2]]
-      competition_analysis <- temp[[1]]
     }
-
     temp <- recalculate_thresholds(data=competition_corrected, thresholds=thresholds, step="competition", coupled_channels = coupled_channels, min_dist=0.5, pc_wells=pc_wells, mid=TRUE)
     competition_corrected_dichot <- temp[[1]]
     thresholds <- temp[[2]]
@@ -281,7 +316,89 @@ QIAcuityAnalysis <- function(input_path, output_path, noise_suppression_strict =
       names(snr_vec)[[curr_channel]] <- channels[[curr_channel]]
     }
 
+    # find artifacts based on z-score in relation to negative partitions
+    # identify partitions that deviate from baseline in multiple channels
+    # join RFU values and thresholds
+    RFU_thresh_joined <- competition_corrected %>%
+      pivot_longer(., cols = channels, names_to = "channel", values_to = "RFU") %>%
+      full_join(., thresholds %>%
+                  select(channel, competition) %>%
+                  dplyr::rename(Threshold = competition))
+    # identify mean and sd values of negative partitions per well, then calculate z-score in relation to negative partitions for all partitions
+    RFU_thresh_joined <- RFU_thresh_joined %>%
+      filter(RFU < Threshold) %>%
+      group_by(Well, channel) %>%
+      summarize(mean_RFU = mean(RFU), sd_RFU = sd(RFU)) %>%
+      full_join(RFU_thresh_joined) %>%
+      mutate(z_score_neg = abs(RFU - mean_RFU)/sd_RFU)
+    # summarize by finding median and minimum z-score across all channels for each partition
+    z_score_neg <- RFU_thresh_joined %>%
+      ungroup() %>%
+      group_by(Well, Sample, Partition) %>%
+      summarize(median_z_score = median(z_score_neg, na.rm = TRUE)) %>%
+      mutate(median_z_score_outlier = ifelse(median_z_score > 4  & is.finite(median_z_score),1, 0))
+
+    # find out which positive partitions are affected!
+    z_score_neg_outliers <- RFU_thresh_joined %>%
+      filter(RFU > Threshold) %>%
+      right_join(., z_score_neg %>% filter(median_z_score_outlier ==1)) %>%
+      filter(!is.na(channel)) %>%
+      select(Well, Sample, Partition, channel, median_z_score)
+
     # find artefacts based on unlikely multiple occupancy!
+
+    # identify channels that are coupled to each other even after crosstalk correction
+    summary_multiple_occupancy_pc <- competition_corrected_dichot %>%
+      filter(Well %in% pc_wells) %>%
+      group_by(pick(channels)) %>%
+      summarize(n = n()) %>%
+      ungroup() %>%
+      mutate(fraction = n/sum(n)) %>%
+      rowwise() %>%
+      mutate(sum_positives = sum(c_across(channels)))
+
+    sp_fractions <- summary_multiple_occupancy_pc %>%
+      filter(sum_positives == 1) %>%
+      pivot_longer(cols = channels, names_to = "Channel", values_to = "status") %>%
+      filter(status == 1) %>%
+      select(Channel, fraction)
+    if(length(channels)>1){
+    permutations_channels <- gtools::permutations(n = length(channels), r = 2, v = channels)
+    colnames(permutations_channels) <- c("channel1", "channel2")
+    expected_frequencies <- permutations_channels %>%
+      data.frame() %>%
+      full_join(., sp_fractions %>% dplyr::rename(channel1 = "Channel", fracch1 = "fraction")) %>%
+      full_join(., sp_fractions %>% dplyr::rename(channel2 = "Channel", fracch2 = "fraction")) %>%
+      mutate(expected_val = fracch1 * fracch2) %>%
+      select(channel1, channel2, expected_val) %>%
+      mutate(status = 1) %>%
+      pivot_wider(names_from = channel1, values_from = status) %>%
+      filter(!is.na(expected_val)) %>%
+      filter(!is.na(channel2)) %>%
+      apply(., 1, function(x){x[x["channel2"]] <- 1
+                              return(x)}) %>%
+      t() %>%
+      data.frame() %>%
+      select(!channel2) %>%
+      mutate(across(any_of(channels), function(x){replace(x, is.na(x), 0)})) %>%
+      mutate(across(channels, function(x){x %>% trimws() %>% as.numeric() %>% return()})) %>%
+      select(expected_val, any_of(channels))
+
+    ratios_channel_combinations <- summary_multiple_occupancy_pc %>%
+      filter(sum_positives == 2) %>%
+      left_join(., expected_frequencies) %>%
+      unique() %>%
+      mutate(ratio = as.numeric(fraction)/as.numeric(expected_val)) %>%
+      select(channels, ratio)
+
+    ratios_channel_combinations <- ratios_channel_combinations %>%
+      pivot_longer(., channels, names_to = "channel1", values_to = "status_ch1") %>%
+      full_join(ratios_channel_combinations) %>%
+      filter(status_ch1 == 1) %>%
+      pivot_longer(., channels, names_to = "channel2", values_to = "status_ch2") %>%
+      filter(status_ch2 != 0) %>%
+      filter(channel1 != channel2) %>%
+      select(channel1, channel2, ratio)
 
     # get # of valid partitions per well
     n_by_well <- data_list %>%
@@ -336,12 +453,14 @@ QIAcuityAnalysis <- function(input_path, output_path, noise_suppression_strict =
     # TASK: SUMMARY OF NUMBER OF DOUBLE POSITIVE PARTITIONS ACROSS CHANNEL COMBINATIONS!
     test_likelihood <- perm %>%
       data.frame() %>%
-      full_join(., positive_rates %>% rename(channel1 = channel)) %>%
-      full_join(., positive_rates %>% rename(channel2 = channel) %>% rename(positive_rate2 = positive_rate)) %>% full_join(n_by_well) %>%
-      mutate(n_double_pos_expected = N_total * positive_rate * positive_rate2) %>%
+      full_join(., positive_rates %>% dplyr::rename(channel1 = channel)) %>%
+      full_join(ratios_channel_combinations) %>%
+      mutate(ratio = replace(ratio, is.na(ratio), 1)) %>%
+      full_join(., positive_rates %>% dplyr::rename(channel2 = channel) %>% dplyr::rename(positive_rate2 = positive_rate)) %>% full_join(n_by_well) %>%
+      mutate(n_double_pos_expected = N_total * positive_rate * positive_rate2 * ratio) %>%
       full_join(multiple_occupancy, .) %>%
       filter(!is.na(n)) %>%
-      mutate(p.value = (.) %>% mutate(across(everything(), as.numeric)) %>% apply(., MARGIN = 1, FUN = function(x){poisson.test(x = x[[4]] %>% round(), T=x[[7]], r = x[[5]] * x[[6]])$p.value %>% return()}))
+      mutate(p.value = (.) %>% mutate(across(everything(), as.numeric)) %>% apply(., MARGIN = 1, FUN = function(x){poisson.test(x = x[[4]] %>% round(), T=x[[8]], r = x[[5]] * x[[6]] * x[[7]], alternative = "greater")$p.value %>% return()}))
 
     associated_likelihoods <- competition_corrected_dichot %>%
       pivot_longer(., cols = all_of(channels), values_to = "status", names_to = "channel") %>%
@@ -360,12 +479,32 @@ QIAcuityAnalysis <- function(input_path, output_path, noise_suppression_strict =
     likelihoods <- likelihoods %>%
       full_join(., n_by_well, by = "Well") %>%
       mutate(expected_value = likelihood * N_total) %>%
-      mutate(outlier = ifelse(expected_value < 0.5, TRUE, FALSE))
+      mutate(outlier = ifelse(expected_value < 0.05/24, TRUE, FALSE))
 
     multiple_occupancy_outliers <- likelihoods %>%
       filter(outlier) %>%
       select(Well, Partition, outlier, likelihood, expected_value) %>%
       left_join(., competition_corrected_dichot, by = c("Well", "Partition"))
+  }
+  else{
+    multiple_occupancy_outliers <- data.frame()
+  }
+    # add info about positive partitions with only an aberrant z-score
+    RFU_summary_pc_wells <- competition_corrected %>%
+      filter(Well %in% pc_wells) %>%
+      pivot_longer(., cols = channels, names_to = "channel", values_to = "RFU") %>%
+      full_join(thresholds %>% select(channel, competition) %>% dplyr::rename(Threshold = "competition")) %>%
+      filter(RFU > Threshold) %>%
+      group_by(channel) %>%
+      summarize(mean = mean(RFU, na.rm = TRUE), sd = sd(RFU, na.rm = TRUE))
+
+    z_score_pos_outliers <- competition_corrected %>%
+      pivot_longer(., cols = channels, names_to = "channel", values_to = "RFU") %>%
+      full_join(thresholds %>% select(channel, competition) %>% dplyr::rename(Threshold = "competition")) %>%
+      filter(RFU > Threshold) %>%
+      full_join(RFU_summary_pc_wells) %>%
+      mutate(z_score = (RFU - mean)/sd) %>%
+      filter(abs(z_score) > 2)
 
     readLines(con=paste(input_path, "Log.txt", sep="\\")) %>% append(c("Analysis completed.")) %>% writeLines(., con=paste(input_path, "Log.txt", sep="\\"))
 
@@ -374,13 +513,20 @@ QIAcuityAnalysis <- function(input_path, output_path, noise_suppression_strict =
 
     # calculate volume
 
-    vol_by_well = data_list %>% bind_rows() %>% mutate(`Is invalid` = ifelse(`Is invalid` == "0", "valid", "invalid")) %>% group_by(Well, `Cycled volume`, Channel, `Is invalid`) %>%
-                    summarize(N_total = n()) %>% pivot_wider(names_from= `Is invalid`, values_from=N_total) %>% mutate(`Cycled volume` = as.numeric(`Cycled volume`)*(valid/(invalid + valid)))
+    vol_by_well = data_list %>%
+      bind_rows() %>%
+      mutate(`Is invalid` = ifelse(`Is invalid` == "0", "valid", "invalid")) %>%
+      group_by(Well, `Cycled volume`, Channel, `Is invalid`) %>%
+      summarize(N_total = n()) %>%
+      pivot_wider(names_from= `Is invalid`, values_from=N_total) %>%
+      mutate(`Cycled volume` = as.numeric(`Cycled volume`)*(valid/(invalid + valid)))
 
     output$Volumes <- vol_by_well
     output$snr <- snr_vec
     output$date <- plate_date %>% unique() %>% na.omit()
-    output$outliers <- multiple_occupancy_outliers
+    output$multiple_occupancy_outliers <- multiple_occupancy_outliers
+    output$correlated_fluorescence_outliers <- z_score_neg_outliers
+    output$aberrant_fluorescence_outliers <- z_score_pos_outliers
     plate_results[[plates[[plate]]]] <- output
   }
 
@@ -493,39 +639,32 @@ saveQIAcuityResult <- function(results, output_path, scatterplots_2d =TRUE, scat
 
         temp_res <- results
         if(correction_step>1){
-          temp_res[[plate]][[corrections[[correction_step]]]]  <- temp_res[[plate]][[corrections[[correction_step]]]] %>% mutate(new = ifelse(temp_res[[plate]][[corrections[[correction_step]]]][temp_res[[plate]]$thresholds$channel[[channel1]]]>temp_res[[plate]]$thresholds[channel1, corrections[[correction_step]] %>% gsub("_corrected", "", .)], 1, 0)) %>% select(!temp_res[[plate]]$thresholds$channel[[channel1]]) %>% rename(!!temp_res[[plate]]$thresholds$channel[[channel1]] := new)
+
+          temp_res[[plate]][[corrections[[correction_step]]]]  <- temp_res[[plate]][[corrections[[correction_step]]]] %>% mutate(new = ifelse(temp_res[[plate]][[corrections[[correction_step]]]][temp_res[[plate]]$thresholds$channel[[channel1]]]>temp_res[[plate]]$thresholds[channel1, corrections[[correction_step]] %>% gsub("_corrected", "", .)], 1, 0)) %>% select(!temp_res[[plate]]$thresholds$channel[[channel1]]) %>% dplyr::rename(!!temp_res[[plate]]$thresholds$channel[[channel1]] := new)
 
           negs <- temp_res[[plate]][[corrections[[correction_step]]]] %>% filter(!!sym(temp_res[[plate]]$thresholds$channel[[channel1]])==0) %>%
             group_by(Well, Sample) %>% count()
           pos <-  temp_res[[plate]][[corrections[[correction_step]]]] %>% filter(!!sym(temp_res[[plate]]$thresholds$channel[[channel1]])==1) %>%
             group_by(Well, Sample) %>% count()
 
-          summary <- merge(negs, pos, all=TRUE, by=c("Well", "Sample")) %>% rename(positive=n.y, negative=n.x) %>%
+          summary <- merge(negs, pos, all=TRUE, by=c("Well", "Sample")) %>% dplyr::rename(positive=n.y, negative=n.x) %>%
             mutate(Channel=temp_res[[plate]]$thresholds$channel[[channel1]])
 
-          summary <- summary %>% mutate(positive= replace(positive, is.na(positive), 0)) %>%
-            mutate(poisson_corrected_targets = (-1* (positive + negative)*log(negative/(positive+negative))) %>% round(digits=2))
+          summary <- summary %>% mutate(positive= replace(positive, is.na(positive), 0))
 
-          mean_RFU_pos <- results[[plate]][[corrections[[correction_step]]]] %>%
-            filter(!!sym(temp_res[[plate]]$thresholds$channel[[channel1]])>results[[plate]]$thresholds[channel1, corrections[[correction_step]] %>% gsub("_corrected", "", .)]) %>% pull(temp_res[[plate]]$thresholds$channel[[channel1]]) %>% mean()
-          sd_RFU_pos <- results[[plate]][[corrections[[correction_step]]]] %>%
-            filter(!!sym(temp_res[[plate]]$thresholds$channel[[channel1]])>results[[plate]]$thresholds[channel1, corrections[[correction_step]] %>% gsub("_corrected", "", .)]) %>% pull(temp_res[[plate]]$thresholds$channel[[channel1]]) %>% sd()
-
-          zscore_RFU_pos <- results[[plate]][[corrections[[correction_step]]]] %>%
-                                filter(!!sym(temp_res[[plate]]$thresholds$channel[[channel1]])>results[[plate]]$thresholds[channel1, corrections[[correction_step]] %>%
-                                      gsub("_corrected", "", .)]) %>% mutate(z_score = (!!sym(temp_res[[plate]]$thresholds$channel[[channel1]])-mean_RFU_pos)/sd_RFU_pos) %>%
-                                          group_by(Well) %>% summarize_at("z_score", mean)
-          zscore_RFU_pos <- zscore_RFU_pos %>% mutate(Warning = ifelse(abs(z_score)>2, "Warning: mean RFU value of positive partitions further than 2 standard deviations away from global mean. Potential artifact.", NA))
-
-          summary <- full_join(summary, zscore_RFU_pos) %>% rename("mean_z_score"=z_score)
+          #summary <- full_join(summary, zscore_RFU_pos) %>% dplyr::rename("mean_z_score"=z_score)
           channel_summaries <- bind_rows(channel_summaries, summary)
+
+
         }
       }
       if(!correction_step==1){
 
         channel_summaries <- channel_summaries %>% mutate(positive=replace(positive, is.na(positive), 0)) %>%
                                 mutate(negative=replace(negative, is.na(negative), 0)) %>%
-                                  mutate(valid=positive + negative)
+                                  mutate(valid=positive + negative) %>%
+          mutate(poisson_corrected_targets = (-1* (positive + negative)*log(negative/(positive+negative))) %>% round(digits=2))
+
 
         mm_vol <- 0
 
@@ -546,6 +685,9 @@ saveQIAcuityResult <- function(results, output_path, scatterplots_2d =TRUE, scat
 
         channel_summaries <- channel_summaries %>% mutate(poisson_corrected_targets = (-1* (positive/factor + negative/factor)*log(negative/factor/(positive/factor+negative/factor))) %>% round(digits=2)) %>% mutate()
 
+        if(length(results[[plate]]$date) == 0){
+          results[[plate]]$date = NA
+        }
 
 
         channel_summaries <- channel_summaries %>%
@@ -557,29 +699,67 @@ saveQIAcuityResult <- function(results, output_path, scatterplots_2d =TRUE, scat
           mutate(CI = paste(min, "-", max)) %>%
           select(!any_of(c("min", "max"))) %>%
           relocate(any_of(c("Sample", "Well", "Channel", "valid",  "negative", "positive", "poisson_corrected_targets", "CI"))) %>%
-          rename(`CI 95%` = CI) %>%
+          dplyr::rename(`CI 95%` = CI) %>%
           mutate(Date = results[[plate]]$date) %>%
           mutate(Experiment = names(results)[[plate]])
 
 
-        channel_summaries <- channel_summaries %>% arrange(factor(Well, levels = well_order)) %>% select(!factor) %>% select(!'Cycled volume')
+        channel_summaries <- channel_summaries %>%
+          arrange(factor(Well, levels = well_order)) %>%
+          select(!factor)
 
 
         channel_summaries <- channel_summaries %>% mutate(Warning = ifelse(lapply(.$CI %>% as.character() %>% strsplit(split=" - "), min)<1 & .$positive > 0, "Warning: confidence interval contains values < 1, positive result may not be reliable.", NA) %>% paste(channel_summaries$Warning, sep=", ") %>% gsub("NA, NA", NA, .) %>% gsub("NA, ", "", .) %>% gsub(", NA", "", .))
 
         # add info about outliers
         if(correction_step == 4){
-          multiple_occupancy_outliers <- results[[plate]][["outliers"]]
-          multiple_occupancy_outliers <- multiple_occupancy_outliers %>%
+          # first, add info about partitions with aberrant z-score only
+          if(length(channels) > 1){
+          multiple_occupancy_outliers <- results[[plate]][["multiple_occupancy_outliers"]]
+
+          multiple_occupancy_outliers_summarized <- multiple_occupancy_outliers %>%
             pivot_longer(., values_to = "status", names_to = "Channel", cols = channels) %>%
             filter(status==1) %>%
             group_by(Sample, Well, Channel) %>%
             summarize(`Multiple occupancy outliers` = n(), `Maximum expected value of outliers` = max(expected_value))
-          channel_summaries <- full_join(channel_summaries, multiple_occupancy_outliers, by = c("Sample", "Well", "Channel")) %>%
-            relocate(., `Multiple occupancy outliers`, `Maximum expected value of outliers`, .after = mean_z_score) %>%
-            mutate(Warning_outliers = ifelse(!is.na(`Multiple occupancy outliers`), "Warning: partitions with unusual multiple occupation, potential artifact.", NA)) %>%
+          }else{
+            multiple_occupancy_outliers <- data.frame(Partition = numeric(), Well = character(), Sample = character())
+            multiple_occupancy_outliers_summarized <- channel_summaries %>% select(Sample, Well, Channel) %>% mutate(`Multiple occupancy outliers` = 0)
+          }
+          channel_summaries <- full_join(channel_summaries, multiple_occupancy_outliers_summarized, by = c("Sample", "Well", "Channel")) %>%
+            mutate(`Multiple occupancy outliers` = replace(`Multiple occupancy outliers`, is.na(`Multiple occupancy outliers`), 0)) %>%
+            #relocate(., `Multiple occupancy outliers`, `Maximum expected value of outliers`, .after = mean_z_score) %>%
+            mutate(Warning_outliers = ifelse(`Multiple occupancy outliers` > 0, "Warning: partitions with unusual multiple occupation, potential artifact.", NA)) %>%
             mutate(Warning = paste(Warning, Warning_outliers) %>% gsub("NA$|^NA", "", .)) %>%
             select(!Warning_outliers)
+
+          correlated_fluorescence_outliers <- results[[plate]]$correlated_fluorescence_outliers %>%
+            anti_join(., multiple_occupancy_outliers, by = c("Partition", "Well", "Sample")) %>%
+            group_by(Well, Sample, channel) %>%
+            summarize(`Correlated fluorescence outliers` = n(), median_z_score_mean = mean(median_z_score))
+
+          channel_summaries <- left_join(channel_summaries, correlated_fluorescence_outliers %>% dplyr::rename(Channel = "channel"), by = c("Well", "Sample", "Channel")) %>%
+            mutate(`Correlated fluorescence outliers` = replace(`Correlated fluorescence outliers`, is.na(`Correlated fluorescence outliers`), 0)) %>%
+            mutate(Warning_outliers = ifelse(`Correlated fluorescence outliers` > 0, "Warning: partitions with increased fluorescence in all channels, potential artifact.", NA)) %>%
+            mutate(Warning = paste(Warning, Warning_outliers) %>% gsub("NA$|^NA", "", .)) %>%
+            select(!Warning_outliers)
+
+          z_score_outliers <- results[[plate]]$aberrant_fluorescence_outliers %>%
+            anti_join(., multiple_occupancy_outliers, by = c("Partition", "Well", "Sample")) %>%
+            anti_join(., results[[plate]]$correlated_fluorescence_outliers, by = c("Partition", "Well", "Sample")) %>%
+            group_by(Well, Sample, channel) %>%
+            summarize(`Aberrant fluorescence outliers` = n(), z_score_mean_of_outliers = mean(z_score))
+
+          channel_summaries <- left_join(channel_summaries, z_score_outliers %>% dplyr::rename(Channel = "channel"), by = c("Well", "Sample", "Channel")) %>%
+            mutate(`Aberrant fluorescence outliers` = replace(`Aberrant fluorescence outliers`, is.na(`Aberrant fluorescence outliers`), 0)) %>%
+            mutate(expected_outliers = positive*(2*0.021)) %>%
+            mutate(`Aberrant fluorescence outliers` = `Aberrant fluorescence outliers`-round(expected_outliers, digits = 0)) %>%
+            mutate(`Aberrant fluorescence outliers` = replace(`Aberrant fluorescence outliers`, `Aberrant fluorescence outliers` < 0, 0)) %>%
+            mutate(`Aberrant fluorescence outliers` = replace(`Aberrant fluorescence outliers`, z_score_mean_of_outliers > -2, 0)) %>%
+            mutate(Warning_outliers = ifelse(`Aberrant fluorescence outliers` > expected_outliers, "Warning: more partitions with extreme fluorescence values in this channel than expected, potential artifact.", NA)) %>%
+            mutate(Warning = paste(Warning, Warning_outliers) %>% gsub("NA$|^NA", "", .)) %>%
+            select(!Warning_outliers) %>%
+            select(!expected_outliers)
         }
 
 

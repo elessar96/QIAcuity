@@ -79,29 +79,62 @@ baseline_correction <- function(raw_data, smooth=TRUE, coupled_channels, channel
     }
 
     turnpoints <- tp_data  %>% find_turnpoints(., variable=current_channel)
-    classified_turnpoints <- classify_peaks(turnpoints = turnpoints, intensities = tp_data, variable = current_channel, channel_maxima = tp_data %>% apply(., 2, get_quantile, probs=0.999), thresholds=thresholds, step="raw", coupled_channels=coupled_channels)
+
+    classified_turnpoints <- classify_peaks(turnpoints = turnpoints,
+                                            intensities = tp_data,
+                                            variable = current_channel,
+                                            channel_maxima = tp_data %>% apply(., 2, get_quantile, probs=0.999),
+                                            thresholds = thresholds,
+                                            step = "raw",
+                                            coupled_channels = coupled_channels,
+                                            recalc = TRUE,
+                                            force_two_peaks = TRUE)
 
     channel_maxima <- tp_data %>% apply(., 2, get_quantile, probs=0.999)
 
     ref_peaks <- classified_turnpoints %>% filter(tp.peak == TRUE | tn.peak == TRUE)
-    if((ref_peaks %>% filter(tp.peak==TRUE) %>% nrow())==0){
-      tp_artif <- classified_turnpoints %>% filter(tp.peaks==TRUE) %>% filter(d.x > ref_peaks %>% filter(tn.peak=TRUE) %>% pull(d.x)) %>% filter(d.x==min(d.x)) %>% mutate(tp.peak=TRUE)
-      ref_peaks <- ref_peaks %>% rbind(., tp_artif)
-    }
-    if((ref_peaks %>% filter(tn.peak==TRUE) %>% nrow())==0){
-      # include three largest peaks as options only
-      tn_artif <- classified_turnpoints %>% filter(tp.peaks==TRUE) %>% mutate(d.y.rank = rank(-d.y)) %>% filter(d.y.rank < 4) %>% filter(d.x < ref_peaks %>% filter(tp.peak=TRUE) %>% pull(d.x)) %>% filter(d.x==min(d.x)) %>% mutate(tn.peak=TRUE) %>% select(!d.y.rank)
-      ref_peaks <- ref_peaks %>% rbind(., tn_artif)
+
+    #if identification of reference peaks fails: define them by rough estimates of characteristics (height of peaks, position of peaks)
+    if((ref_peaks %>% filter(tp.peak==TRUE) %>% nrow())==0 | (ref_peaks %>% filter(tn.peak==TRUE) %>% nrow())==0){
+      tp_artif <- turnpoints %>%
+        filter(tp.peaks==TRUE) %>%
+        mutate(d.y.rank = rank(-d.y)) %>%
+        filter(d.y.rank < 4) %>%
+        filter(d.x==max(d.x, na.rm = TRUE)) %>%
+        mutate(tp.peak=TRUE) %>%
+        mutate(tn.peak=FALSE) %>%
+        select(!d.y.rank)
+
+      tn_artif <- turnpoints %>%
+        filter(tp.peaks==TRUE) %>%
+        mutate(d.y.rank = rank(-d.y)) %>%
+        filter(d.y.rank < 4) %>%
+        filter(d.x==min(d.x, na.rm = TRUE)) %>%
+        mutate(tn.peak=TRUE) %>%
+        mutate(tp.peak=FALSE) %>%
+        select(!d.y.rank)
+
+      ref_peaks <- rbind(tn_artif, tp_artif)
     }
 
     # calculate baseline for each well
 
     for(well in 1:length(wells)){
       # try to find threshold for each well guided by positive controls, limited by crosstalk signals
-      well_data <- raw_data %>% na.omit() %>% select(!any_of(exclude)) %>% filter(Well==wells[[well]])
+      well_data <- raw_data %>%
+        select(!any_of(exclude)) %>%
+        filter(Well==wells[[well]]) %>%
+        na.omit()
 
       turnpoints_well <- well_data %>% select(!any_of(c("Well", "Sample", "Partition"))) %>% na.omit() %>% find_turnpoints(., variable=current_channel, n_points=15)
-      classified_turnpoints_well <- classify_peaks(turnpoints = turnpoints_well, intensities = well_data %>% select(!any_of(c("Well", "Sample", "Partition"))), variable = current_channel, channel_maxima = channel_maxima, reference_peaks = ref_peaks, thresholds = thresholds, step="raw", coupled_channels = coupled_channels)
+      classified_turnpoints_well <- classify_peaks(turnpoints = turnpoints_well,
+                                                   intensities = well_data %>% select(!any_of(c("Well", "Sample", "Partition"))) %>% na.omit(),
+                                                   variable = current_channel,
+                                                   channel_maxima = channel_maxima,
+                                                   reference_peaks = ref_peaks,
+                                                   thresholds = thresholds,
+                                                   step="raw",
+                                                   coupled_channels = coupled_channels)
 
       tn_peak_well <- classified_turnpoints_well %>% filter(tn.peak == TRUE)
 
@@ -123,7 +156,6 @@ baseline_correction <- function(raw_data, smooth=TRUE, coupled_channels, channel
         }else{
           if(smooth==TRUE){
             baseline <- smooth_data(well_data, upper_lim = upper_lim, lower_lim= lower_lim, current_channel=current_channel) %>% select(Well, Partition, baseline) %>% rbind(baseline, .)
-            #baseline %>% filter(Well == wells[[well]]) %>% pull(baseline) %>% mean() %>% print()
           }else{
             baseline_well <- well_data %>% filter(!!sym(current_channel) > lower_lim) %>% filter(!!sym(current_channel) < upper_lim) %>% select(any_of(current_channel)) %>% unlist() %>% median()
             baseline <- data.frame(Well=well_data$Well, Partition = well_data$Partition, baseline = baseline_well) %>% rbind(baseline, .)
@@ -149,12 +181,20 @@ baseline_correction <- function(raw_data, smooth=TRUE, coupled_channels, channel
 #' @param min_dist Minimum distance of the threshold to negative band relative to difference between negative and positive band (0.2 = 20% of the difference between the negative and positive band is the minimum distance between negative band and threshold)
 #' @return Returns a list of (1) the thresholds and (2) the data, transformed to 0 or 1 depending on whether the fluorescence value exceeds the threshold
 
-recalculate_thresholds <- function(data, thresholds, step, coupled_channels, min_dist=0.2, mid=FALSE, pc_wells, noise_suppression_strict =TRUE){
+recalculate_thresholds <- function(data,
+                                   thresholds,
+                                   step,
+                                   coupled_channels,
+                                   min_dist=0.2,
+                                   mid=FALSE,
+                                   pc_wells,
+                                   noise_suppression_strict =TRUE){
   channels <- thresholds$channel
-  #maxima <- data %>% group_by(Well) %>% na.omit() %>% summarize_at(channels, get_quantile, probs=0.999)
-  #pc_wells <- maxima %>% mutate(across(.cols=any_of(channels), .fns=function(x){return(x-min(x))})) %>% mutate(across(.cols=any_of(channels), .fns=function(x){return(x/max(x))}))  %>% mutate(minimum = apply(across(channels), 1, min)) %>% mutate(median = apply(across(channels), 1, median)) %>% filter(median == max(median) | minimum == max(minimum) | median == min(median)) %>% pull(Well) %>% unique()
+
   corrs <- colnames(thresholds)[-1]
+
   position = which(corrs==step)-1
+
   if(position ==0){
     position <- 1
   }
@@ -175,7 +215,19 @@ recalculate_thresholds <- function(data, thresholds, step, coupled_channels, min
       comparison_channels <- comparison_channels[which(!comparison_channels %in% (coupled_channels  %>% filter(ch1==channels[[i]]) %>% unlist() %>% unique()))]
     }
 
-    threshold <- data %>% filter(Well %in% pc_wells) %>% select(any_of(c(channels[[i]], comparison_channels))) %>%  density_threshold(., variable=channels[[i]], min_dist = min_dist, mid=mid, thresholds = thresholds, step=prev_step, coupled_channels=coupled_channels, recalc = recalc, noise_suppression_strict = noise_suppression_strict)
+    threshold <- data %>%
+      filter(Well %in% pc_wells) %>%
+      select(any_of(c(channels[[i]], comparison_channels))) %>%
+      density_threshold(.,
+                        variable=channels[[i]],
+                        min_dist = min_dist,
+                        mid=mid,
+                        thresholds = thresholds,
+                        step=prev_step,
+                        coupled_channels=coupled_channels,
+                        recalc = recalc,
+                        noise_suppression_strict = noise_suppression_strict,
+                        force_two_peaks = TRUE)
 
     thresholds[which(thresholds$channel ==channels[[i]]), step]<- threshold
 
